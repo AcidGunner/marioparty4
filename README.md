@@ -1,12 +1,14 @@
-# Mario Party 4 for PS3
-=============
+Mario Party 4 for PS3
+============
+This is a Fan-made Port of Mario Party 4 for PS3.  
+It does NOT contain any game assets. An existing copy of the game is required.
 
-This is a Fan-made Port of MP4 for PS3.
-
-# AI Disclosure
+AI Disclosure
+--------
 The code for porting to PS3 is AI-generated with Claude, but the tests are made manually.
 
-# Some more stuff
+Some more stuff
+--------
 Version Completion:
 
 - `GMPE01_00`: Rev 0 (USA) ❌
