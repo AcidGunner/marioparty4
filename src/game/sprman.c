@@ -211,6 +211,110 @@ void HuSprPauseSet(BOOL value)
     HuSprPauseF = value;
 }
 
+#ifdef TARGET_PC
+/* Disc/embedded animation blobs use the GameCube layout: big-endian, 4-byte pointers (stored as offsets).
+ * ANIMDATA/ANIMBANK/ANIMPAT/ANIMBMP hold real pointers, so on a 64-bit build they are a different size and
+ * cannot be fixed up in place. Instead the blob is parsed field by field into native structs.
+ * ANIMFRAME/ANIMLAYER contain only s16/u8, so they stay in the blob (NOTE: on a little-endian host their
+ * s16 fields would still need byte-swapping; the PS3 is big-endian so it does not).
+ * An in-place marker records the conversion: the blob's bank-offset slot (+8) is overwritten with the
+ * 32-bit address of the native ANIMDATA (the arena and .data are below 4 GB). */
+#include <stdint.h>
+#include <string.h>
+
+static u32 rd32be(const u8 *p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
+static u16 rd16be(const u8 *p) { return (u16)(((u32)p[0] << 8) | p[1]); }
+static void wr32be(u8 *p, u32 v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+
+ANIMDATA *HuSprAnimRead(void *data)
+{
+    u8 *raw = (u8 *)data;
+    ANIMDATA *anim;
+    ANIMBANK *bank;
+    ANIMPAT *pat;
+    ANIMBMP *bmp;
+    s16 i, bankNum, patNum, bmpNum;
+    u32 w, nativeHi;
+    const u8 *b, *p, *m;
+
+    /* Already a native ANIMDATA (HuSprAnimMake or an earlier read)? Its 64-bit `bank` pointer's high word is 0;
+       a raw blob never has 0 there (the header occupies the first 0x14 bytes). */
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    nativeHi = *(u32 *)(raw + 8);
+#else
+    nativeHi = *(u32 *)(raw + 12);
+#endif
+    if (nativeHi == 0) {
+        ((ANIMDATA *)data)->useNum++;
+        return (ANIMDATA *)data;
+    }
+    w = rd32be(raw + 8);
+    if (w & 0xFFFF0000) { /* blob already converted: marker is the native struct's address */
+        anim = (ANIMDATA *)(uintptr_t)w;
+        anim->useNum++;
+        return anim;
+    }
+
+    bankNum = rd16be(raw + 0);
+    patNum = rd16be(raw + 2);
+    bmpNum = rd16be(raw + 4);
+    anim = (ANIMDATA *)HuMemDirectMalloc(HEAP_MODEL, sizeof(ANIMDATA) + bankNum * sizeof(ANIMBANK)
+                                         + patNum * sizeof(ANIMPAT) + bmpNum * sizeof(ANIMBMP));
+    if ((uintptr_t)anim >> 32) {
+        OSReport("sprman: ANIMDATA at %p is above 4 GB, cannot mark blob\n", (void *)anim);
+        OSPanic("sprman.c", __LINE__, "anim above 4GB\n");
+    }
+    memset(anim, 0, sizeof(ANIMDATA) + bankNum * sizeof(ANIMBANK) + patNum * sizeof(ANIMPAT) + bmpNum * sizeof(ANIMBMP));
+    bank = (ANIMBANK *)(anim + 1);
+    pat = (ANIMPAT *)(bank + bankNum);
+    bmp = (ANIMBMP *)(pat + patNum);
+    anim->bankNum = bankNum;
+    anim->patNum = patNum;
+    anim->bmpNum = bmpNum;
+    anim->useNum = 0;
+    anim->bank = bank;
+    anim->pat = pat;
+    anim->bmp = bmp;
+    anim->port_src = raw;
+
+    b = raw + rd32be(raw + 8);   /* GC ANIMBANK: s16 timeNum, s16 unk, u32 frame  (8 bytes)  */
+    p = raw + rd32be(raw + 0xC); /* GC ANIMPAT: 5 x s16, pad, u32 layer           (0x10 bytes) */
+    m = raw + rd32be(raw + 0x10);/* GC ANIMBMP: u8,u8,s16,s16,s16,u32,u32,u32     (0x14 bytes) */
+    for (i = 0; i < bankNum; i++, b += 8) {
+        bank[i].timeNum = rd16be(b);
+        bank[i].unk = rd16be(b + 2);
+        bank[i].frame = (ANIMFRAME *)(raw + rd32be(b + 4));
+    }
+    for (i = 0; i < patNum; i++, p += 0x10) {
+        pat[i].layerNum = rd16be(p);
+        pat[i].centerX = rd16be(p + 2);
+        pat[i].centerY = rd16be(p + 4);
+        pat[i].sizeX = rd16be(p + 6);
+        pat[i].sizeY = rd16be(p + 8);
+        pat[i].layer = (ANIMLAYER *)(raw + rd32be(p + 0xC));
+    }
+    for (i = 0; i < bmpNum; i++, m += 0x14) {
+        bmp[i].pixSize = m[0];
+        bmp[i].dataFmt = m[1];
+        bmp[i].palNum = rd16be(m + 2);
+        bmp[i].sizeX = rd16be(m + 4);
+        bmp[i].sizeY = rd16be(m + 6);
+        bmp[i].dataSize = rd32be(m + 8);
+        bmp[i].palData = raw + rd32be(m + 0xC);
+        bmp[i].data = raw + rd32be(m + 0x10);
+    }
+    wr32be(raw + 8, (u32)(uintptr_t)anim); /* in-place "already converted" marker */
+    return anim;
+}
+
+void HuSprAnimFree(ANIMDATA *anim)
+{
+    if (anim->port_src) {
+        HuMemDirectFree(anim->port_src);
+    }
+    HuMemDirectFree(anim);
+}
+#else
 ANIMDATA *HuSprAnimRead(void *data)
 {
     s16 i;
@@ -242,6 +346,7 @@ ANIMDATA *HuSprAnimRead(void *data)
     anim->useNum = 0;
     return anim;
 }
+#endif
 
 void HuSprAnimLock(ANIMDATA *anim)
 {
@@ -406,7 +511,7 @@ void HuSprAnimKill(ANIMDATA *anim)
                 HuMemDirectFree(anim->bmp->palData);
             }
         }
-        HuMemDirectFree(anim);
+        HuSprAnimFree(anim);
     }
 }
 
@@ -664,6 +769,9 @@ ANIMDATA *HuSprAnimMake(s16 sizeX, s16 sizeY, s16 dataFmt)
     bmp->dataSize = sizeX*sizeY*bitSizeTbl[dataFmt]/8;
     bmp->palData = NULL;
     bmp->data = NULL;
+#ifdef TARGET_PC
+    anim->port_src = NULL;
+#endif
     return anim;
 }
 

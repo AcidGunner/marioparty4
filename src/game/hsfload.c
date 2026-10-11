@@ -1,3 +1,4 @@
+#ifndef TARGET_PC /* 32-bit in-place loader; see hsfload_pc.c for the 64-bit replacement */
 #include "game/hsfload.h"
 #include "game/EnvelopeExec.h"
 #include "ctype.h"
@@ -61,34 +62,63 @@ static HSFBITMAP *SearchBitmapPtr(s32 id);
 static char *GetString(u32 *str_ofs);
 static char *GetMotionString(u16 *str_ofs);
 
+#ifdef TARGET_PC
+#define HSF_TRACE(s) OSReport("[hsf] " s "\n")
+#else
+#define HSF_TRACE(s)
+#endif
+
 HSFDATA *LoadHSF(void *data)
 {
     HSFDATA *hsf;
     Model.root = NULL;
     objtop = NULL;
+    HSF_TRACE("FileLoad");
     FileLoad(data);
+    HSF_TRACE("SceneLoad");
     SceneLoad();
+    HSF_TRACE("ColorLoad");
     ColorLoad();
+    HSF_TRACE("PaletteLoad");
     PaletteLoad();
+    HSF_TRACE("BitmapLoad");
     BitmapLoad();
+    HSF_TRACE("MaterialLoad");
     MaterialLoad();
+    HSF_TRACE("AttributeLoad");
     AttributeLoad();
+    HSF_TRACE("VertexLoad");
     VertexLoad();
+    HSF_TRACE("NormalLoad");
     NormalLoad();
+    HSF_TRACE("STLoad");
     STLoad();
+    HSF_TRACE("FaceLoad");
     FaceLoad();
+    HSF_TRACE("ObjectLoad");
     ObjectLoad();
+    HSF_TRACE("CenvLoad");
     CenvLoad();
+    HSF_TRACE("SkeletonLoad");
     SkeletonLoad();
+    HSF_TRACE("PartLoad");
     PartLoad();
+    HSF_TRACE("ClusterLoad");
     ClusterLoad();
+    HSF_TRACE("ShapeLoad");
     ShapeLoad();
+    HSF_TRACE("MapAttrLoad");
     MapAttrLoad();
+    HSF_TRACE("MotionLoad");
     MotionLoad();
+    HSF_TRACE("MatrixLoad");
     MatrixLoad();
+    HSF_TRACE("SetHsfModel");
     hsf = SetHsfModel();
+    HSF_TRACE("InitEnvelope");
     InitEnvelope(hsf);
     objtop = NULL;
+    HSF_TRACE("LoadHSF done");
     return hsf;
     
 }
@@ -1535,3 +1565,4 @@ static char *GetMotionString(u16 *str_ofs)
     char *ret = &StringTable[*str_ofs];
     return ret;
 }
+#endif /* !TARGET_PC */

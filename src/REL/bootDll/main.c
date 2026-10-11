@@ -48,6 +48,12 @@ static void UpdateDemoMess(void);
 #if VERSION_NTSC
 void BootProgExec(void);
 #endif
+#ifdef TARGET_PC
+#define PT() OSReport("[trace] %s:%d\n", __FILE__, __LINE__)
+#else
+#define PT()
+#endif
+
 void BootTitleCreate(void);
 BOOL BootTitleExec(void);
 
@@ -98,35 +104,53 @@ void BootExec(void)
     #if VERSION_NTSC
     if (omovlevtno == 0) {
         BootProgExec();
+    PT();
     }
     #else
     if(SystemInitF == FALSE) {
         GwLanguage = LanguageBootGet();
+    PT();
         if(GwLanguage == -1) {
             if(LanguageMenuExec()) {
                 SystemInitF = TRUE;
             }
         } else {
             GWLanguageSet(GwLanguage);
+    PT();
         }
     }
     #endif
     group = HuSprGrpCreate(2);
+    PT();
     data = HuSprAnimRead(NintendoDataDecode());
+    PT();
     sprite_nintendo = HuSprCreate(data, 0, 0);
+    PT();
     HuSprGrpMemberSet(group, 0, sprite_nintendo);
+    PT();
     HuSprPosSet(group, 0, 288, 240);
+    PT();
     HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
+    PT();
     if (omovlevtno != 0) {
         HuAudSndGrpSetSet(0);
+    PT();
         data = HuSprAnimReadFile(TITLE_HUDSON_ANM);
+    PT();
         sprite_hudson = HuSprCreate(data, 0, 0);
+    PT();
         HuSprGrpMemberSet(group, 1, sprite_hudson);
+    PT();
         HuSprPosSet(group, 1, 288, 240);
+    PT();
         HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+    PT();
         HuWinInit(1);
+    PT();
         BootTitleCreate();
+    PT();
         SystemInitF = 1;
+    PT();
     }
     else {
         s16 group_thp;
@@ -135,38 +159,61 @@ void BootExec(void)
         s16 sprite_thp;
         for (i = 0; i < 4; i++) {
             GWPlayerCfg[i].pad_idx = i;
+    PT();
         }
         #if VERSION_PAL
         if(SystemInitF) {
             data = HuSprAnimReadFile(TITLE_HUDSON_ANM);
+    PT();
             sprite_hudson = HuSprCreate(data, 0, 0);
+    PT();
             HuSprGrpMemberSet(group, 1, sprite_hudson);
+    PT();
             HuSprPosSet(group, 1, 288, 240);
+    PT();
             HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+    PT();
             HuAudSndGrpSetSet(0);
+    PT();
             BootTitleCreate();
+    PT();
             HuWinInit(1);
+    PT();
         }
         #endif
     repeat:
         HuSprAttrReset(group, 0, HUSPR_ATTR_DISPOFF);
+    PT();
         WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 30);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         WipeColorSet(255, 255, 255);
+    PT();
         if (!SystemInitF) {
             tick_prev = OSGetTick();
+    PT();
             CharInit();
+    PT();
             HuWindowInit();
+    PT();
             MGSeqInit();
+    PT();
             HuWinInit(1);
+    PT();
             BootTitleCreate();
+    PT();
             data = HuSprAnimReadFile(TITLE_HUDSON_ANM);
+    PT();
             sprite_hudson = HuSprCreate(data, 0, 0);
+    PT();
             HuSprGrpMemberSet(group, 1, sprite_hudson);
+    PT();
             HuSprPosSet(group, 1, 288, 240);
+    PT();
             HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+    PT();
             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
                 HuPrcVSleep();
             }
@@ -186,22 +233,31 @@ void BootExec(void)
             }
         }
         WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 30);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
+    PT();
         HuSprAttrReset(group, 1, HUSPR_ATTR_DISPOFF);
+    PT();
         HuPrcSleep(60);
+    PT();
         WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 30);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         if (!SystemInitF) {
             void *group_samp;
             tick_prev = OSGetTick();
+    PT();
             group_samp = HuMemDirectMalloc(HEAP_MODEL, msmSysGetSampSize(0));
+    PT();
             msmSysLoadGroup(0, group_samp, 0);
+    PT();
             HuMemDirectFree(group_samp);
+    PT();
             while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 3000) {
                 HuPrcVSleep();
             }
@@ -222,39 +278,60 @@ void BootExec(void)
         }
         #if VERSION_PAL
         initLanguageF = TRUE;
+    PT();
         #endif
         WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 30);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         tick_prev = OSGetTick();
+    PT();
         if (!SystemInitF) {
             HuAudSndGrpSetSet(0);
+    PT();
             SystemInitF = 1;
+    PT();
         }
         while (OSTicksToMilliseconds(OSGetTick() - tick_prev) < 1000) {
             HuPrcVSleep();
         }
         HuSprAttrSet(group, 0, HUSPR_ATTR_DISPOFF);
+    PT();
         HuSprAttrSet(group, 1, HUSPR_ATTR_DISPOFF);
+    PT();
         group_thp = HuSprGrpCreate(1);
+    PT();
         sprite_thp = HuTHPSprCreateVol("movie/opmov_a00.thp", 0, 100, 122);
+    PT();
         HuSprGrpMemberSet(group_thp, 0, sprite_thp);
+    PT();
         HuSprPosSet(group_thp, 0, 288, 240);
+    PT();
         HuWinMesMaxSizeBetGet(win_size, MAKE_MESSID(54, 0), MAKE_MESSID(54, 4));
+    PT();
         demoWinId = HuWinCreate(-10000, 448 - win_size[1], win_size[0], win_size[1], 0);
+    PT();
         HuWinMesSpeedSet(demoWinId, 0);
+    PT();
         HuWinBGTPLvlSet(demoWinId, 0);
+    PT();
         HuWinPriSet(demoWinId, 10);
+    PT();
         HuWinAttrSet(demoWinId, 0x800);
+    PT();
         HuPrcSleep(5);
+    PT();
         WipeCreate(WIPE_MODE_IN, WIPE_TYPE_NORMAL, 10);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         skip_wait = FALSE;
+    PT();
         while (!HuTHPEndCheck()) {
             UpdateDemoMess();
+    PT();
             if (HuPadBtnDown[0] & (PAD_BUTTON_START | PAD_BUTTON_A)) {
                 skip_wait = TRUE;
                 break;
@@ -262,39 +339,53 @@ void BootExec(void)
             HuPrcVSleep();
         }
         WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 30);
+    PT();
         while (WipeStatGet()) {
             HuPrcVSleep();
         }
         HuWinKill(demoWinId);
+    PT();
         HuTHPClose();
+    PT();
         HuPrcVSleep();
         HuSprGrpKill(group_thp);
+    PT();
         if (!skip_wait) {
             HuPrcSleep(60);
+    PT();
         }
         skip_wait = FALSE;
+    PT();
     }
     if (!BootTitleExec()) {
         HuPrcSleep(60);
+    PT();
         goto repeat;
     }
     WipeColorSet(255, 255, 255);
+    PT();
     HuAudSStreamAllFadeOut(500);
+    PT();
     WipeCreate(WIPE_MODE_OUT, WIPE_TYPE_NORMAL, 30);
+    PT();
     while (WipeStatGet()) {
         HuPrcVSleep();
     }
     HuPrcVSleep();
     if (omSysExitReq) {
         omOvlReturnEx(1, 1);
+    PT();
     }
     else {
         omOvlCallEx(DLL_modeseldll, 1, 0, 0);
+    PT();
     }
     for (i = 0; i < 4; i++) {
         GWPlayerCfg[i].character = -1;
+    PT();
     }
     HuPrcEnd();
+    PT();
     do {
         HuPrcVSleep();
     } while (1);
@@ -528,49 +619,88 @@ void BootTitleCreate(void)
     ANIMDATA *sprite_data;
     s16 i;
     titleMdlId[0] = model = Hu3DModelCreateFile(TITLE_CHAR_HSF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_ATTR_DISPOFF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_MOTATTR_LOOP);
+    PT();
     titleMdlId[1] = model = Hu3DModelCreateFile(TITLE_CUBE_HSF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_ATTR_DISPOFF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_MOTATTR_LOOP);
+    PT();
     titleMdlId[2] = model = Hu3DModelCreateFile(TITLE_SKY_HSF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_ATTR_DISPOFF);
+    PT();
     Hu3DModelAttrSet(model, HU3D_MOTATTR_LOOP);
+    PT();
     Hu3DModelCameraInfoSet(model, 1);
+    PT();
     Hu3DModelLightInfoSet(model, 1);
+    PT();
     #if VERSION_NTSC
     bootGrpId = HuSprGrpCreate(4);
+    PT();
     #else
     bootGrpId = HuSprGrpCreate(13);
+    PT();
     #endif
     sprite_data = HuSprAnimReadFile(TITLE_BG_ANM);
+    PT();
     sprite = HuSprCreate(sprite_data, 0, 0);
+    PT();
     HuSprGrpMemberSet(bootGrpId, 0, sprite);
+    PT();
     HuSprAttrSet(bootGrpId, 0, HUSPR_ATTR_DISPOFF);
+    PT();
     HuSprDrawNoSet(bootGrpId, 0, 127);
+    PT();
     HuSprPosSet(bootGrpId, 0, 288, 240);
+    PT();
     sprite_data = HuSprAnimReadFile(TITLE_COPYRIGHT_ANM);
+    PT();
     sprite = HuSprCreate(sprite_data, 1, 0);
+    PT();
     HuSprGrpMemberSet(bootGrpId, 1, sprite);
+    PT();
     HuSprAttrSet(bootGrpId, 1, HUSPR_ATTR_DISPOFF);
+    PT();
     HuSprPosSet(bootGrpId, 1, 288, 420);
+    PT();
     #if VERSION_NTSC
     sprite_data = HuSprAnimReadFile(TITLE_PRESS_START_ANM);
+    PT();
     sprite = HuSprCreate(sprite_data, 2, 0);
+    PT();
     HuSprGrpMemberSet(bootGrpId, 2, sprite);
+    PT();
     HuSprAttrSet(bootGrpId, 2, HUSPR_ATTR_DISPOFF | HUSPR_ATTR_LINEAR);
+    PT();
     HuSprPosSet(bootGrpId, 2, 288, 380);
+    PT();
     sprite_data = HuSprAnimReadFile(TITLE_LOGO_ANM);
+    PT();
     sprite = HuSprCreate(sprite_data, 0, 0);
+    PT();
     HuSprGrpMemberSet(bootGrpId, 3, sprite);
+    PT();
     HuSprAttrSet(bootGrpId, 3, HUSPR_ATTR_DISPOFF | HUSPR_ATTR_LINEAR);
+    PT();
     HuSprPosSet(bootGrpId, 3, 288, 200);
+    PT();
     #else
     sprite_data = HuSprAnimReadFile(TITLE_LOGO_ANM);
+    PT();
     sprite = HuSprCreate(sprite_data, 0, 0);
+    PT();
     HuSprGrpMemberSet(bootGrpId, 2, sprite);
+    PT();
     HuSprAttrSet(bootGrpId, 2, HUSPR_ATTR_DISPOFF | HUSPR_ATTR_LINEAR);
+    PT();
     HuSprPosSet(bootGrpId, 2, 288, 200);
+    PT();
     for(i=0; i<5; i++) {
         sprite_data = HuSprAnimReadFile(TITLE_PRESS_START_EN_ANM+i);
         sprite = HuSprCreate(sprite_data, 3+i, 0);

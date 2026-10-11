@@ -5,6 +5,11 @@
 #include "game/hsfload.h"
 #include "game/init.h"
 #include "game/memory.h"
+#ifdef TARGET_PC
+#define PT() OSReport("[trace] %s:%d\n", __FILE__, __LINE__)
+#else
+#define PT()
+#endif
 #include "game/perf.h"
 #include "game/ShapeExec.h"
 #include "game/sprite.h"
@@ -291,8 +296,8 @@ void Hu3DAllKill(void) {
     Hu3DCameraAllKill();
     Hu3DLightAllKill();
     Hu3DAnimAllKill();
-    if(reflectAnim[0] != (ANIMDATA *)refMapData0) {
-        HuMemDirectFree(reflectAnim[0]);
+    if(!HU_ANIM_IS_BLOB(reflectAnim[0], refMapData0)) {
+        HuSprAnimFree(reflectAnim[0]);
     }
     reflectAnim[0] = HuSprAnimRead(refMapData0);
     if(Hu3DShadowData.buf) {
@@ -351,11 +356,13 @@ s16 Hu3DModelCreate(void *arg0) {
         return -1;
     }
     var_r31->hsf = LoadHSF(arg0);
+    PT();
     var_r31->mallocNo = Hu3DMallocNo = (u32)var_r31->hsf;
     var_r31->attr = HU3D_ATTR_NONE;
     var_r31->motAttr = HU3D_ATTR_NONE;
     var_r31->projBit = 0;
     MakeDisplayList(var_r30, var_r31->mallocNo);
+    PT();
     var_r31->motWork.speed = 1.0f;
     for (i = 0; i < 4; i++) {
         var_r31->motIdCluster[i] = -1;
@@ -365,7 +372,9 @@ s16 Hu3DModelCreate(void *arg0) {
     var_r31->motIdShape = -1;
     var_r31->motWork.time = 0.0f;
     if (var_r31->hsf->motionNum != 0) {
+        PT();
         var_r31->motId = var_r31->motIdSrc = Hu3DMotionModelCreate(var_r30);
+        PT();
         if (var_r31->hsf->cenvNum != 0) {
             Hu3DMotionExec(var_r30, var_r31->motId, 0.0f, 0);
             EnvelopeProc(var_r31->hsf);
@@ -382,6 +391,7 @@ s16 Hu3DModelCreate(void *arg0) {
     } else {
         var_r31->motIdSrc = var_r31->motId = -1;
     }
+    PT();
     var_r31->pos.x = var_r31->pos.y = var_r31->pos.z = 0.0f;
     var_r31->rot.x = var_r31->rot.y = var_r31->rot.z = 0.0f;
     var_r31->scale.x = var_r31->scale.y = var_r31->scale.z = 1.0f;
@@ -402,9 +412,11 @@ s16 Hu3DModelCreate(void *arg0) {
     PSMTXIdentity(var_r31->mtx);
     layerNum[0] += 1;
     HuMemDCFlush(HEAP_MODEL);
+    PT();
     if ((var_r31->hsf->sceneNum != 0) && ((var_r31->hsf->scene->fogStart) || (var_r31->hsf->scene->fogEnd))) {
         Hu3DFogSet(var_r31->hsf->scene->fogStart, var_r31->hsf->scene->fogEnd, var_r31->hsf->scene->color.r, var_r31->hsf->scene->color.g, var_r31->hsf->scene->color.b);
     }
+    PT();
     return var_r30;
 }
 
@@ -565,7 +577,7 @@ void Hu3DModelKill(s16 arg0) {
         }
         Hu3DAnimModelKill(arg0);
         if (temp_r31->linkMdlId != -1) {
-            HuMemDirectFree(temp_r31->hsf);
+            HuHsfFree(temp_r31->hsf);
             HuMemDirectFreeNum(HEAP_MODEL, temp_r31->mallocNoLink);
             var_r28 = temp_r31->hsfLink;
             temp_r31->hsf = var_r28;
@@ -601,7 +613,7 @@ void Hu3DModelKill(s16 arg0) {
             }
             return;
         }
-        HuMemDirectFree(temp_r31->hsf);
+        HuHsfFree(temp_r31->hsf);
         HuMemDirectFreeNum(HEAP_MODEL, temp_r31->mallocNo);
         for (i = 0; i < temp_r31->lightNum; i++) {
             Hu3DGLightKill(temp_r31->lightId[i]);
@@ -1850,8 +1862,8 @@ void lightSet(HU3DLIGHT* arg0, s16 arg1, Mtx *arg2, Mtx *arg3, f32 arg8) {
 
 void Hu3DReflectMapSet(ANIMDATA* arg0) {
 
-    if (reflectAnim[0] != (ANIMDATA*) refMapData0) {
-        HuMemDirectFree(reflectAnim[0]);
+    if (!HU_ANIM_IS_BLOB(reflectAnim[0], refMapData0)) {
+        HuSprAnimFree(reflectAnim[0]);
     }
     reflectAnim[0] = HuSprAnimRead(arg0);
     reflectMapNo = 0;

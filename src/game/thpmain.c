@@ -25,6 +25,11 @@ static s16 THPStat;
 static u32 THPFrame;
 static s16 THPStart;
 HUPROCESS *THPProc;
+#ifdef TARGET_PC
+/* THP (video) playback is not implemented on this port. When THPSimpleOpen() fails, the movie is reported as
+   already finished so scripts waiting on HuTHPEndCheck() continue, and the player process just waits to be closed. */
+static s16 THPPortSkipped;
+#endif
 
 s16 HuTHPSprCreateVol(char *path, s16 loop, s16 prio, float volume)
 {
@@ -50,6 +55,9 @@ s16 HuTHPSprCreateVol(char *path, s16 loop, s16 prio, float volume)
     THPLoopF = loop;
     THPStat = 0;
     THPFrame = 0;
+#ifdef TARGET_PC
+    THPPortSkipped = 0;
+#endif
     return temp_r31;
 }
 
@@ -79,6 +87,9 @@ s16 HuTHP3DCreateVol(char *path, s16 loop, float volume)
     THPLoopF = loop;
     THPStat = 0;
     THPFrame = 0;
+#ifdef TARGET_PC
+    THPPortSkipped = 0;
+#endif
     Hu3DModelAttrSet(SimpleControl.unk19E, HU3D_ATTR_DISPOFF);
     return temp_r31;
 }
@@ -107,6 +118,11 @@ BOOL HuTHPEndCheck(void)
 {
     s32 temp_r31;
 
+#ifdef TARGET_PC
+    if (THPPortSkipped) {
+        return TRUE;
+    }
+#endif
     temp_r31 = THPSimpleGetTotalFrame() - 1;
     if (temp_r31 <= 0) {
         return FALSE;
@@ -135,6 +151,26 @@ static void THPTestProc(void)
     u32 var_r28;
     void *temp_r30;
 
+#ifdef TARGET_PC
+    if (THPSimpleOpen(THPFileName) == 0) {
+        OSReport("THP: video playback is not supported on this port, skipping '%s'\n", THPFileName);
+        THPPortSkipped = 1;
+        while (THPStat != 2) {
+            HuPrcVSleep();
+        }
+        if (SimpleControl.unk19C == 1) {
+            Hu3DModelKill(SimpleControl.unk19E);
+        }
+        else {
+            HuSprKill(SimpleControl.unk19E);
+        }
+        THPProc = NULL;
+        HuPrcKill(HuPrcCurrentGet());
+        while (1) {
+            HuPrcVSleep();
+        }
+    }
+#endif
     while (THPSimpleOpen(THPFileName) == 0) {
         OSReport("THPSimpleOpen fail");
         HuPrcVSleep();

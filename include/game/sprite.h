@@ -90,6 +90,13 @@ HUSPRITE *HuSprCall(void);
 void HuSprFinish(void);
 void HuSprPauseSet(BOOL value);
 ANIMDATA *HuSprAnimRead(void *data);
+#ifdef TARGET_PC
+#define HU_ANIM_IS_BLOB(a, blob) ((a)->port_src == (void *)(blob))
+void HuSprAnimFree(ANIMDATA *anim);
+#else
+#define HU_ANIM_IS_BLOB(a, blob) ((a) == (ANIMDATA *)(blob))
+#define HuSprAnimFree(a) HuMemDirectFree(a)
+#endif
 void HuSprAnimLock(ANIMDATA *anim);
 s16 HuSprCreate(ANIMDATA *anim, s16 prio, s16 bank);
 s16 HuSprFuncCreate(HUSPRFUNC func, s16 prio);

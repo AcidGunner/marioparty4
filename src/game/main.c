@@ -17,6 +17,12 @@
 #include "game/wipe.h"
 #include "version.h"
 
+#ifdef PORT_PS3
+#define T(s) OSReport("[main] " s "\n")
+#else
+#define T(s)
+#endif
+
 extern FileListEntry _ovltbl[];
 u32 GlobalCounter;
 static u32 vcheck;
@@ -58,23 +64,33 @@ void main(void)
     #else
     HuSysInit(&GXPal528IntDf);
     #endif
+    T("HuPrcInit");
     HuPrcInit();
+    T("HuPadInit");
     HuPadInit();
+    T("GWInit");
     GWInit();
+    T("pfInit");
     pfInit();
     GlobalCounter = 0;
+    T("HuSprInit");
     HuSprInit();
+    T("Hu3DInit"); 
     Hu3DInit();
+    T("HuDataInit");
     HuDataInit();
+    T("HuPerfInit");
     HuPerfInit();
     HuPerfCreate("USR0", 0xFF, 0xFF, 0xFF, 0xFF);
     HuPerfCreate("USR1", 0, 0xFF, 0xFF, 0xFF);
+    T("WipeInit");
     WipeInit(RenderMode);
     
     for (i = 0; i < 4; i++) {
         GWPlayerCfg[i].character = -1;
     }
     
+    T("omMasterInit");
     omMasterInit(0, _ovltbl, DLL_MAX, DLL_bootdll);
     VIWaitForRetrace();
     
@@ -117,6 +133,11 @@ void main(void)
         GXReadMemMetric(&cp_req, &tc_req, &cpu_rd_req, &cpu_wr_req, &dsp_req, &io_req, &vi_req, &pe_req, &rf_req, &fi_req);
         HuPerfEnd(2);
         GlobalCounter++;
+#ifdef TARGET_PC
+        if ((GlobalCounter % 60) == 0) {
+            OSReport("[frame %d] t=%d ms\n", (int)GlobalCounter, (int)(OSGetTime() / 40500));
+        }
+#endif
     }
 }
 

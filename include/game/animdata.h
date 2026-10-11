@@ -78,6 +78,11 @@ typedef struct AnimData_s {
 /* 0x08 */ ANIMBANK *bank;
 /* 0x0C */ ANIMPAT *pat;
 /* 0x10 */ ANIMBMP *bmp;
-} ANIMDATA; //sizeof 0x14
+#ifdef TARGET_PC
+    /* PC/PS3 only: raw GameCube-layout blob this was converted from (NULL if built natively).
+       The GC layout has 4-byte pointers, so it cannot be used as-is on a 64-bit build. */
+    void *port_src;
+#endif
+} ANIMDATA; //sizeof 0x14 on GC
 
 #endif

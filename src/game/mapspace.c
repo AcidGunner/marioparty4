@@ -4,7 +4,12 @@
 #include "ext_math.h"
 
 #ifdef __MWERKS__
+#ifdef TARGET_PC
+/* x86-64/PPC64 pass float and double differently; the real definition takes f32 */
+extern void HuSetVecF(Vec*, f32, f32, f32);
+#else
 extern void HuSetVecF(Vec*, double, double, double);
+#endif
 #endif
 
 static BOOL PolygonRangeCheck(HSFMAPATTR *arg0, float arg1, float arg2, float *arg3, float arg4);

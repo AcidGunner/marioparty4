@@ -4,6 +4,7 @@
 
 #ifndef __MWERKS__
 #include <string.h>
+#include <stdint.h>
 #endif
 
 typedef s32 (*DLLProlog)(void);
@@ -91,6 +92,55 @@ void omDLLEnd(s16 dllno, s16 flag)
 	OSReport("objdll>End DLL finish\n");
 }
 
+#ifdef TARGET_PC
+/* Overlays are linked into the executable (port/ps3/src/rel_table.c); there is no file to read or relocate.
+ * The module header is a zeroed native struct whose prolog/epilog hold the entry points. Function pointers
+ * fit in u32 here because the code/OPD live below 4 GB. */
+extern int port_rel_lookup(const char *path, s32 (**prolog)(void), void (**epilog)(void));
+
+omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
+{
+	omDllData *dll;
+	FileListEntry *dllFile = &omDLLFileList[overlay];
+	s32 (*prolog)(void) = NULL;
+	void (*epilog)(void) = NULL;
+	OSReport("objdll>Link DLL:%s\n", dllFile->name);
+	dll = HuMemDirectMalloc(HEAP_HEAP, sizeof(omDllData));
+	*dll_ptr = dll;
+	dll->name = dllFile->name;
+	dll->module = HuMemDirectMalloc(HEAP_HEAP, sizeof(OSModuleHeader));
+	memset(dll->module, 0, sizeof(OSModuleHeader));
+	dll->bss = NULL;
+	if(!port_rel_lookup(dllFile->name, &prolog, &epilog)) {
+		OSReport("objdll>overlay %s is not linked into this build (see PORT_RELS in port/ps3/Makefile)\n", dllFile->name);
+		OSPanic("objdll.c", __LINE__, "overlay missing\n");
+	}
+	if(((uintptr_t)prolog | (uintptr_t)epilog) >> 32) {
+		OSPanic("objdll.c", __LINE__, "overlay entry point above 4GB\n");
+	}
+	dll->module->prolog = (u32)(uintptr_t)prolog;
+	dll->module->epilog = (u32)(uintptr_t)epilog;
+	OSReport("objdll>LinkOK (static) %s\n", dllFile->name);
+	if(flag == 1) {
+		OSReport("objdll> %s prolog start\n", dllFile->name);
+		dll->ret = ((DLLProlog)dll->module->prolog)();
+		OSReport("objdll> %s prolog end\n", dllFile->name);
+	}
+	return dll;
+}
+
+void omDLLUnlink(omDllData *dll_ptr, s16 flag)
+{
+	OSReport("odjdll>Unlink DLL:%s\n", dll_ptr->name);
+	if(flag == 1) {
+		OSReport("objdll>Unlink DLL epilog\n");
+		((DLLEpilog)dll_ptr->module->epilog)();
+		OSReport("objdll>Unlink DLL epilog finish\n");
+	}
+	HuMemDirectFree(dll_ptr->module);
+	HuMemDirectFree(dll_ptr);
+}
+#else
 omDllData *omDLLLink(omDllData **dll_ptr, s16 overlay, s16 flag)
 {
 	omDllData *dll;
@@ -130,6 +180,8 @@ void omDLLUnlink(omDllData *dll_ptr, s16 flag)
 	HuMemDirectFree(dll_ptr->module);
 	HuMemDirectFree(dll_ptr);
 }
+
+#endif
 
 s32 omDLLSearch(s16 overlay)
 {

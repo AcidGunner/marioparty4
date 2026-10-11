@@ -90,7 +90,7 @@ s32 Hu3DMotionKill(s16 arg0) {
         return 0;
     }
     if (temp_r31->modelId == -1) {
-        HuMemDirectFree(temp_r31->hsf);
+        HuHsfFree(temp_r31->hsf);
     } else {
         Hu3DData[temp_r31->modelId].motIdSrc = -1;
     }
