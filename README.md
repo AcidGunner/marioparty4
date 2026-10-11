@@ -83,7 +83,12 @@ Building
   ```
   ninja
   ```
-
+  
+- Compiling for PS3:
+  ```
+  make -f port/ps3/Makefile self
+  ```
+  
 Diffing
 =======
 
