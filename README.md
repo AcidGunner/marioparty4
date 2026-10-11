@@ -89,6 +89,12 @@ Building
   make -f port/ps3/Makefile self
   ```
   
+- Booting on PS3:
+  1. Extract Game's content via Dolphin Emulator.
+  2. Move the directory's contents (`data`, `dll`, `mess`, and etc.) to either `/dev_usb000/MP4/`,
+`/dev_usb001/MP4/`, `/dev_hdd0/MP4/` or `/dev_hdd0/game/MP4PORT01/USRDIR/disc/`.
+  3. Play it!
+  
 Diffing
 =======
 
