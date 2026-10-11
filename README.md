@@ -1,26 +1,16 @@
-Mario Party 4  
-[![Build Status]][actions] [![Progress]][progress site] [![DOL Progress]][progress site] [![RELs Progress]][progress site] [![Discord Badge]][discord]
+# Mario Party 4 for PS3
 =============
 
-[Build Status]: https://github.com/mariopartyrd/marioparty4/actions/workflows/build.yml/badge.svg
-[actions]: https://github.com/mariopartyrd/marioparty4/actions/workflows/build.yml
-[Progress]: https://decomp.dev/mariopartyrd/marioparty4.svg?mode=shield&measure=code&label=Code&category=all
-[DOL Progress]: https://decomp.dev/mariopartyrd/marioparty4.svg?mode=shield&measure=code&label=DOL&category=dol
-[RELs Progress]: https://decomp.dev/mariopartyrd/marioparty4.svg?mode=shield&measure=code&label=RELs&category=modules
-[progress site]: https://decomp.dev/mariopartyrd/marioparty4
-[Discord Badge]: https://img.shields.io/discord/994839212618690590?color=%237289DA&logo=discord&logoColor=%23FFFFFF
-[discord]: https://discord.gg/T4faGveujK
+This is a Fan-made Port of MP4 for PS3.
 
-A work-in-progress decompilation of Mario Party 4. While the two USA versions are completely matching, most non-game-engine code is not documented at all. Work on the PAL and JP versions is currently stale, as it involves a lot of repetitive work, which could be done much easier later when there is special tooling for porting splits and symbols between versions.
+# AI Disclosure
+The code for porting to PS3 is AI-generated with Claude, but the tests are made manually.
 
-There is **NO** working PC port yet, but it is in the making.
-
-This repository does **not** contain any game assets or assembly whatsoever. An existing copy of the game is required.
-
+# Some more stuff
 Version Completion:
 
-- `GMPE01_00`: Rev 0 (USA) ✅
-- `GMPE01_01`: Rev 1 (USA) ✅
+- `GMPE01_00`: Rev 0 (USA) ❌
+- `GMPE01_01`: Rev 1 (USA) ✅ < currently being tested
 - `GMPP01_00`: Rev 0 (PAL) ❌
 - `GMPP01_01`: Rev 1 (PAL) ❌
 - `GMPP01_02`: Rev 2 (PAL) ❌
