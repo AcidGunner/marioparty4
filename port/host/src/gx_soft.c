@@ -22,13 +22,9 @@
 #include <sys/time.h>
 
 /* Internal render resolution divisor: 1 = full 640x480, 2 = half (320x240, upscaled by the video layer).
- * The PS3 defaults to 2 until the rasterizer is faster; override with -DGX_DIV=1. */
+ * Default is full resolution; -DGX_DIV=2 trades quality for speed. */
 #ifndef GX_DIV
-#ifdef PORT_PS3
-#define GX_DIV 2
-#else
 #define GX_DIV 1
-#endif
 #endif
 #define EFB_W (640 / GX_DIV)
 #define EFB_H (528 / GX_DIV)
@@ -130,7 +126,7 @@ static struct {
 
 /* ---- statistics, printed once per ~2 seconds of presented frames ---- */
 static struct {
-    u32 tex_decodes, tris, px_fast, px_general, frames;
+    u32 tex_decodes, tris, tris_drawn, px_fast, px_general, frames, vc_hit, vc_miss, fast_fail[8];
     u64 t_draw, t_present, t_decode, t_last;
 } G_stats;
 
@@ -140,6 +136,8 @@ static u64 now_us(void)
     gettimeofday(&tv, NULL);
     return (u64)tv.tv_sec * 1000000ull + tv.tv_usec;
 }
+
+static u32 vepoch = 1; /* bumped by every call that changes how a vertex would be transformed/lit */
 
 static GXFifoObj fifo_dummy;
 
@@ -598,25 +596,25 @@ void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht)
 void GXSetProjection(const void *mtx, GXProjectionType type)
 {
     const float *m = (const float *)mtx; /* Mtx44, row-major */
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     memcpy(G.proj, m, sizeof(G.proj));
 }
 
 void GXLoadPosMtxImm(const void *mtx, u32 id)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (id / 3 < 10) memcpy(G.pos_mtx[id / 3], mtx, 12 * sizeof(float));
 }
 
 void GXLoadNrmMtxImm(const void *mtx, u32 id)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (id / 3 < 10) memcpy(G.nrm_mtx[id / 3], mtx, 12 * sizeof(float));
 }
 
 void GXLoadTexMtxImm(const void *mtx, u32 id, GXTexMtxType type)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (id >= GX_TEXMTX0 && (id - GX_TEXMTX0) / 3 < 10) {
         float m[12];
         memset(m, 0, sizeof(m));
@@ -626,25 +624,25 @@ void GXLoadTexMtxImm(const void *mtx, u32 id, GXTexMtxType type)
     }
 }
 
-void GXSetCurrentMtx(u32 id) { gx_ensure_init(); G.cur_mtx = (id / 3 < 10) ? id / 3 : 0; }
+void GXSetCurrentMtx(u32 id) { gx_ensure_init(); vepoch++; G.cur_mtx = (id / 3 < 10) ? id / 3 : 0; }
 
-void GXClearVtxDesc(void) { gx_ensure_init(); memset(G.vdesc, 0, sizeof(G.vdesc)); }
-void GXSetVtxDesc(GXAttr attr, GXAttrType type) { gx_ensure_init(); if (attr <= GX_VA_MAX_ATTR) G.vdesc[attr] = type; }
+void GXClearVtxDesc(void) { gx_ensure_init(); vepoch++; memset(G.vdesc, 0, sizeof(G.vdesc)); }
+void GXSetVtxDesc(GXAttr attr, GXAttrType type) { gx_ensure_init(); vepoch++; if (attr <= GX_VA_MAX_ATTR) G.vdesc[attr] = type; }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (vtxfmt < 8 && attr <= GX_VA_MAX_ATTR) { G.vfmt[vtxfmt][attr].cnt = cnt; G.vfmt[vtxfmt][attr].type = type; G.vfmt[vtxfmt][attr].frac = frac; }
 }
 
 void GXSetArray(GXAttr attr, const void *data, u32 size, u8 stride)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (attr <= GX_VA_MAX_ATTR) { G.arr[attr] = (const u8 *)data; G.arr_stride[attr] = stride; }
 }
 
-void GXSetNumChans(u8 n) { gx_ensure_init(); G.nchans = n; }
-void GXSetNumTexGens(u8 n) { gx_ensure_init(); G.ntexgens = n; }
+void GXSetNumChans(u8 n) { gx_ensure_init(); vepoch++; G.nchans = n; }
+void GXSetNumTexGens(u8 n) { gx_ensure_init(); vepoch++; G.ntexgens = n; }
 void GXSetNumTevStages(u8 n) { gx_ensure_init(); G.ntev = n > MAXTEV ? MAXTEV : n; }
 
 static void color_to_f4(float o[4], GXColor c) { o[0] = c.r / 255.f; o[1] = c.g / 255.f; o[2] = c.b / 255.f; o[3] = c.a / 255.f; }
@@ -653,7 +651,7 @@ void GXSetChanMatColor(GXChannelID chan, GXColor c)
 {
     float f[4];
     int ch = (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) ? 1 : 0;
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     color_to_f4(f, c);
     if (chan == GX_COLOR0 || chan == GX_COLOR1 || chan == GX_COLOR0A0 || chan == GX_COLOR1A1) memcpy(G.mat[ch], f, 3 * sizeof(float));
     if (chan == GX_ALPHA0 || chan == GX_ALPHA1 || chan == GX_COLOR0A0 || chan == GX_COLOR1A1) G.mat[ch][3] = f[3];
@@ -663,7 +661,7 @@ void GXSetChanAmbColor(GXChannelID chan, GXColor c)
 {
     float f[4];
     int ch = (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) ? 1 : 0;
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     color_to_f4(f, c);
     if (chan == GX_COLOR0 || chan == GX_COLOR1 || chan == GX_COLOR0A0 || chan == GX_COLOR1A1) memcpy(G.amb[ch], f, 3 * sizeof(float));
     if (chan == GX_ALPHA0 || chan == GX_ALPHA1 || chan == GX_COLOR0A0 || chan == GX_COLOR1A1) G.amb[ch][3] = f[3];
@@ -672,7 +670,7 @@ void GXSetChanAmbColor(GXChannelID chan, GXColor c)
 void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src, u32 light_mask, GXDiffuseFn diff_fn, GXAttnFn attn_fn)
 {
     int idx[2], n = 0, i;
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     switch (chan) {
         case GX_COLOR0: idx[n++] = 0; break;
         case GX_COLOR1: idx[n++] = 1; break;
@@ -737,14 +735,14 @@ void GXInitSpecularDir(GXLightObj *o, float nx, float ny, float nz)
 void GXLoadLightObjImm(GXLightObj *o, GXLightID light)
 {
     int i;
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     for (i = 0; i < 8; i++) if (light & (1u << i)) { memcpy(&G.light[i], o, sizeof(LightD)); break; }
 }
 
 /* texgen */
 void GXSetTexCoordGen2(GXTexCoordID dst, GXTexGenType func, GXTexGenSrc src, u32 mtx, GXBool normalize, u32 postmtx)
 {
-    gx_ensure_init();
+    gx_ensure_init(); vepoch++;
     if (dst < 8) { G.texgen[dst].func = func; G.texgen[dst].src = src; G.texgen[dst].mtx = mtx; G.texgen[dst].post = postmtx; }
 }
 
@@ -846,6 +844,8 @@ static struct {
     Raw raw;
     PV buf[4];
     int nbuf;
+    u64 vkey;
+    int all_idx, cur_indexed;
     int recording;
     u8 *dl;
     u32 dl_cap, dl_len;
@@ -918,8 +918,10 @@ static void transform_vertex(const Raw *r, PV *o)
     n[0] = nm[0] * r->nrm[0] + nm[1] * r->nrm[1] + nm[2] * r->nrm[2];
     n[1] = nm[4] * r->nrm[0] + nm[5] * r->nrm[1] + nm[6] * r->nrm[2];
     n[2] = nm[8] * r->nrm[0] + nm[9] * r->nrm[1] + nm[10] * r->nrm[2];
-    nl = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-    if (nl > 1e-8f) { n[0] /= nl; n[1] /= nl; n[2] /= nl; }
+    if (G.chan[0].enable || G.chan[1].enable || G.chan[2].enable || G.chan[3].enable) {
+        nl = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (nl > 1e-8f) { n[0] /= nl; n[1] /= nl; n[2] /= nl; }
+    }
     /* colour channels */
     for (c = 0; c < 2; c++) {
         float rgb[4], lit[4];
@@ -994,11 +996,31 @@ static void push_vertex(const PV *v)
     }
 }
 
+extern int port_gx_no_vcache;
+typedef struct { u64 key; u32 epoch; PV pv; } VCache;
+static VCache vcache[256];
+
 static void finish_vertex(void)
 {
-    PV pv;
-    transform_vertex(&A.raw, &pv);
-    push_vertex(&pv);
+    if (A.all_idx && !port_gx_no_vcache) {
+        /* all attributes came from indexed arrays: the transformed vertex is a pure function of the indices */
+        VCache *e = &vcache[(u32)(A.vkey ^ (A.vkey >> 29) ^ (A.vkey >> 47)) & 255];
+        if (e->epoch == vepoch && e->key == A.vkey) {
+            G_stats.vc_hit++;
+        } else {
+            transform_vertex(&A.raw, &e->pv);
+            e->key = A.vkey;
+            e->epoch = vepoch;
+            G_stats.vc_miss++;
+        }
+        push_vertex(&e->pv);
+    } else {
+        PV pv;
+        transform_vertex(&A.raw, &pv);
+        push_vertex(&pv);
+    }
+    A.vkey = (u64)A.fmt + 1469598103934665603ull;
+    A.all_idx = 1;
     /* reset colours to white for the next vertex when no colour is supplied */
     A.raw.clr[0][0] = A.raw.clr[0][1] = A.raw.clr[0][2] = A.raw.clr[0][3] = 1.f;
     A.raw.clr[1][0] = A.raw.clr[1][1] = A.raw.clr[1][2] = A.raw.clr[1][3] = 1.f;
@@ -1019,6 +1041,8 @@ static void begin_prim(int prim, int fmt)
     int i, j;
     prim_t0 = now_us();
     A.in_prim = 1; A.prim = prim; A.fmt = fmt & 7; A.nbuf = 0; A.parity = 0;
+    A.vkey = (u64)A.fmt + 1469598103934665603ull;
+    A.all_idx = 1;
     A.slot = next_slot(0);
     memset(&A.raw, 0, sizeof(A.raw));
     for (i = 0; i < 2; i++) for (j = 0; j < 4; j++) A.raw.clr[i][j] = 1.f;
@@ -1035,6 +1059,7 @@ static void put_floats(int n, const float *f)
 {
     int attr, i;
     if (!A.in_prim || A.slot >= 12) return;
+    if (!A.cur_indexed) A.all_idx = 0;
     attr = vorder[A.slot];
     if (attr == GX_VA_POS) { for (i = 0; i < 3; i++) A.raw.pos[i] = i < n ? f[i] : 0.f; }
     else if (attr == GX_VA_NRM) { for (i = 0; i < 3; i++) A.raw.nrm[i] = i < n ? f[i] : 0.f; }
@@ -1061,6 +1086,7 @@ static void put_color(float r, float g, float b, float a)
 {
     int attr;
     if (!A.in_prim || A.slot >= 12) return;
+    if (!A.cur_indexed) A.all_idx = 0;
     attr = vorder[A.slot];
     if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
         float *c = A.raw.clr[attr - GX_VA_CLR0];
@@ -1085,7 +1111,18 @@ static int comp_size(int type)
     return (type == GX_U8 || type == GX_S8) ? 1 : ((type == GX_U16 || type == GX_S16) ? 2 : 4);
 }
 
+static void put_index_impl(unsigned idx);
+
 static void put_index(unsigned idx)
+{
+    if (!A.in_prim || A.slot >= 12) return;
+    A.vkey = (A.vkey ^ (((u64)idx << 8) | (u64)A.slot)) * 1099511628211ull;
+    A.cur_indexed = 1;
+    put_index_impl(idx);
+    A.cur_indexed = 0;
+}
+
+static void put_index_impl(unsigned idx)
 {
     int attr;
     const u8 *base;
@@ -1571,29 +1608,129 @@ static int edge_top_left(float ax, float ay, float bx, float by)
     return (dy == 0.f && dx > 0.f) || dy < 0.f;
 }
 
-/* ---- fast path: single TEV stage in one of the standard configurations, trivial alpha test ---- */
+/* ---- fast paths: a single TEV stage in one of the standard configurations ---- */
 enum { FAST_NONE = 0, FAST_MODULATE, FAST_REPLACE, FAST_PASSCLR };
+
+int port_gx_force_generic; /* test hook: forces the generic TEV path */
+int port_gx_no_vcache;     /* test hook: disables the post-transform vertex cache */
+
+static inline int cmp_i(int func, int a, int b)
+{
+    switch (func) {
+        case GX_NEVER: return 0;
+        case GX_LESS: return a < b;
+        case GX_EQUAL: return a == b;
+        case GX_LEQUAL: return a <= b;
+        case GX_GREATER: return a > b;
+        case GX_NEQUAL: return a != b;
+        case GX_GEQUAL: return a >= b;
+        default: return 1;
+    }
+}
+
+static inline int atest8(int a8)
+{
+    int r0 = cmp_i(G.ac0, a8, G.ar0), r1 = cmp_i(G.ac1, a8, G.ar1);
+    switch (G.aop) {
+        case GX_AOP_AND: return r0 && r1;
+        case GX_AOP_OR: return r0 || r1;
+        case GX_AOP_XOR: return r0 ^ r1;
+        default: return !(r0 ^ r1);
+    }
+}
 
 static int fast_select(void)
 {
     const Stage *st = &G.st[0];
     int tex_ok;
-    if (G.ntev != 1) return FAST_NONE;
-    if (st->c_op != GX_TEV_ADD || st->a_op != GX_TEV_ADD || st->c_bias != GX_TB_ZERO || st->a_bias != GX_TB_ZERO) return FAST_NONE;
-    if (st->c_scale != GX_CS_SCALE_1 || st->a_scale != GX_CS_SCALE_1 || !st->c_clamp || !st->a_clamp || st->c_out != 0 || st->a_out != 0) return FAST_NONE;
-    if (!(G.ac0 == GX_ALWAYS && G.ac1 == GX_ALWAYS && (G.aop == GX_AOP_AND || G.aop == GX_AOP_OR))) return FAST_NONE;
-    if (st->color != GX_COLOR0A0 && st->color != GX_COLOR0) return FAST_NONE;
+    if (port_gx_force_generic) return FAST_NONE;
+    if (G.ntev != 1) { G_stats.fast_fail[1]++; return FAST_NONE; }
+    if (st->c_op != GX_TEV_ADD || st->a_op != GX_TEV_ADD || st->c_bias != GX_TB_ZERO || st->a_bias != GX_TB_ZERO) { G_stats.fast_fail[2]++; return FAST_NONE; }
+    if (st->c_scale != GX_CS_SCALE_1 || st->a_scale != GX_CS_SCALE_1 || !st->c_clamp || !st->a_clamp || st->c_out != 0 || st->a_out != 0) { G_stats.fast_fail[3]++; return FAST_NONE; }
+    if (st->color != GX_COLOR0A0 && st->color != GX_COLOR0) { G_stats.fast_fail[4]++; return FAST_NONE; }
     tex_ok = st->map < 8 && st->coord < 8 && G.bound[st->map] && G.bound[st->map]->rgba && G.ntexgens > st->coord;
     if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_TEXC && st->ci[2] == GX_CC_RASC && st->ci[3] == GX_CC_ZERO &&
-        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_TEXA && st->ai[2] == GX_CA_RASA && st->ai[3] == GX_CA_ZERO)
-        return tex_ok ? FAST_MODULATE : FAST_NONE;
+        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_TEXA && st->ai[2] == GX_CA_RASA && st->ai[3] == GX_CA_ZERO) {
+        if (!tex_ok) { G_stats.fast_fail[6]++; return FAST_NONE; }
+        return FAST_MODULATE;
+    }
     if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_ZERO && st->ci[2] == GX_CC_ZERO && st->ci[3] == GX_CC_TEXC &&
-        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_ZERO && st->ai[2] == GX_CA_ZERO && st->ai[3] == GX_CA_TEXA)
-        return tex_ok ? FAST_REPLACE : FAST_NONE;
+        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_ZERO && st->ai[2] == GX_CA_ZERO && st->ai[3] == GX_CA_TEXA) {
+        if (!tex_ok) { G_stats.fast_fail[6]++; return FAST_NONE; }
+        return FAST_REPLACE;
+    }
     if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_ZERO && st->ci[2] == GX_CC_ZERO && st->ci[3] == GX_CC_RASC &&
         st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_ZERO && st->ai[2] == GX_CA_ZERO && st->ai[3] == GX_CA_RASA)
         return FAST_PASSCLR;
+    G_stats.fast_fail[5]++;
     return FAST_NONE;
+}
+
+/* ---- integer helpers for the affine fast path ---- */
+static inline u32 lerp32(u32 c0, u32 c1, int w) /* w 0..256, both colours packed 0xAARRGGBB */
+{
+    u32 rb = (((c0 & 0x00FF00FFu) * (u32)(256 - w) + (c1 & 0x00FF00FFu) * (u32)w) >> 8) & 0x00FF00FFu;
+    u32 ag = ((((c0 >> 8) & 0x00FF00FFu) * (u32)(256 - w) + ((c1 >> 8) & 0x00FF00FFu) * (u32)w)) & 0xFF00FF00u;
+    return rb | ag;
+}
+
+static inline int mul8(int a, int b)
+{
+    int t = a * b + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
+/* u, v: texel coordinates in 16.16 fixed point */
+static inline u32 fetch_i(const Tex *t, int linear, int u, int v)
+{
+    int ws = t->ws & 3, wt = t->wt & 3;
+    if (linear) {
+        int fu = u - 32768, fv = v - 32768;
+        int x0 = fu >> 16, y0 = fv >> 16;
+        int ax = (fu >> 8) & 255, ay = (fv >> 8) & 255;
+        int x1, y1;
+        u32 c00, c10, c01, c11;
+        if (ax <= 2) ax = 0; else if (ax >= 254) { ax = 0; x0++; }
+        if (ay <= 2) ay = 0; else if (ay >= 254) { ay = 0; y0++; }
+        if ((ax | ay) == 0) return t->rgba[wrap_fast(y0, t->h, t->hmask, wt) * t->w + wrap_fast(x0, t->w, t->wmask, ws)];
+        x1 = wrap_fast(x0 + 1, t->w, t->wmask, ws);
+        y1 = wrap_fast(y0 + 1, t->h, t->hmask, wt);
+        x0 = wrap_fast(x0, t->w, t->wmask, ws);
+        y0 = wrap_fast(y0, t->h, t->hmask, wt);
+        c00 = t->rgba[y0 * t->w + x0]; c10 = t->rgba[y0 * t->w + x1];
+        c01 = t->rgba[y1 * t->w + x0]; c11 = t->rgba[y1 * t->w + x1];
+        return lerp32(lerp32(c00, c10, ax), lerp32(c01, c11, ax), ay);
+    }
+    return t->rgba[wrap_fast(v >> 16, t->h, t->hmask, wt) * t->w + wrap_fast(u >> 16, t->w, t->wmask, ws)];
+}
+
+/* ---- per-row coverage: the pixels k in [0,n) whose edge function is inside, with the top-left rule ---- */
+static inline int edge_in(float e_row, float dEx, int k, int tl)
+{
+    float e = e_row + dEx * (float)k;
+    return e > 0.f || (e == 0.f && tl);
+}
+
+static void edge_span(float e_row, float dEx, int tl, int n, int *lo, int *hi)
+{
+    if (dEx == 0.f) {
+        if (!edge_in(e_row, 0.f, 0, tl)) *lo = *hi; /* empty */
+    } else if (dEx > 0.f) {
+        float t = -e_row / dEx;
+        int kmin = t < -1.f ? -1 : (t > (float)(n + 1) ? n + 1 : (int)ceilf(t));
+        if (kmin < 0) kmin = 0;
+        while (kmin > 0 && edge_in(e_row, dEx, kmin - 1, tl)) kmin--;
+        while (kmin < n && !edge_in(e_row, dEx, kmin, tl)) kmin++;
+        if (kmin > *lo) *lo = kmin;
+    } else {
+        float t = e_row / -dEx;
+        int kmax = t < -1.f ? 0 : (t > (float)(n + 1) ? n : (int)ceilf(t)); /* exclusive upper bound guess */
+        if (kmax < 0) kmax = 0;
+        if (kmax > n) kmax = n;
+        while (kmax < n && edge_in(e_row, dEx, kmax, tl)) kmax++;
+        while (kmax > 0 && !edge_in(e_row, dEx, kmax - 1, tl)) kmax--;
+        if (kmax < *hi) *hi = kmax;
+    }
 }
 
 #define NA_MAX 28
@@ -1601,19 +1738,21 @@ static int fast_select(void)
 static void raster_tri(PV *v0, PV *v1, PV *v2)
 {
     PV *v[3] = { v0, v1, v2 };
-    G_stats.tris++;
     float sx[3], sy[3], sz[3], iw[3];
     float area, minx, maxx, miny, maxy;
     int x0, x1, y0, y1, x, y, i, k, tl0, tl1, tl2;
-    int fast, na, affine, ntc, wmask = -1, hmask = -1;
+    int fast, na, affine, ntc, int_path;
     const Tex *ftex = NULL;
-    int fcoord = 0;
-    float inv_area, iw_const = 1.f;
+    int fcoord = 0, flinear = 0;
+    float inv_area, iw_const = 1.f, inv_iw_const = 1.f;
     float dEx[3], dEy[3], e_row[3];
     float pl0[NA_MAX], pldx[NA_MAX], pldy[NA_MAX];
     int nfast_blend, alpha_trivial;
     int act[NA_MAX], nact = 0;
-    float inv_iw_const = 1.f;
+    int use_col1 = 0;
+    unsigned tcmask = 0;
+    float col[2][4], tc[8][2];
+    G_stats.tris++;
     for (i = 0; i < 3; i++) {
         float w = v[i]->cw;
         if (w == 0.f) return;
@@ -1631,7 +1770,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
         if (G.cull == GX_CULL_BACK && !front) return;
         if (G.cull == GX_CULL_FRONT && front) return;
     }
-    if (area < 0.f) { /* make the winding positive so edge functions are >= 0 inside */
+    if (area < 0.f) { /* make the winding positive so edge functions are > 0 inside */
         PV *tv = v[1]; float t;
         v[1] = v[2]; v[2] = tv;
         t = sx[1]; sx[1] = sx[2]; sx[2] = t;
@@ -1640,9 +1779,6 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
         t = iw[1]; iw[1] = iw[2]; iw[2] = t;
         area = -area;
     }
-    tl0 = edge_top_left(sx[1], sy[1], sx[2], sy[2]); /* edge opposite v0 */
-    tl1 = edge_top_left(sx[2], sy[2], sx[0], sy[0]);
-    tl2 = edge_top_left(sx[0], sy[0], sx[1], sy[1]);
     minx = fminf(sx[0], fminf(sx[1], sx[2]));
     maxx = fmaxf(sx[0], fmaxf(sx[1], sx[2]));
     miny = fminf(sy[0], fminf(sy[1], sy[2]));
@@ -1658,7 +1794,11 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     if (x1 > EFB_W) x1 = EFB_W;
     if (y1 > EFB_H) y1 = EFB_H;
     if (x0 >= x1 || y0 >= y1) return;
+    G_stats.tris_drawn++;
 
+    tl0 = edge_top_left(sx[1], sy[1], sx[2], sy[2]); /* edge opposite v0 */
+    tl1 = edge_top_left(sx[2], sy[2], sx[0], sy[0]);
+    tl2 = edge_top_left(sx[0], sy[0], sx[1], sy[1]);
     /* edge functions: E0 opposite v0 (edge v1->v2), E1 (v2->v0), E2 (v0->v1); weight_i = E_i / area */
     dEx[0] = -(sy[2] - sy[1]); dEy[0] = sx[2] - sx[1];
     dEx[1] = -(sy[0] - sy[2]); dEy[1] = sx[0] - sx[2];
@@ -1676,92 +1816,147 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     if (fast == FAST_MODULATE || fast == FAST_REPLACE) {
         ftex = G.bound[G.st[0].map];
         fcoord = G.st[0].coord;
-        wmask = ftex->wmask;
-        hmask = ftex->hmask;
+        flinear = (ftex->ws & 0x80) != 0;
     }
     nfast_blend = (G.bl_type == GX_BM_BLEND && G.bl_src == GX_BL_SRCALPHA && G.bl_dst == GX_BL_INVSRCALPHA) ? 1 : (G.bl_type == GX_BM_NONE ? 2 : 0);
+    int_path = fast && affine && nfast_blend && G.col_upd && G.a_upd;
 
-    /* attribute planes: 0 z, 1 iw, 2..5 col0*iw, 6..9 col1*iw, 10+2j,11+2j texcoord j * iw */
+    /* attribute planes: 0 z, 1 iw, 2..5 col0*iw, 6..9 col1*iw, 10+2j,11+2j texcoord j * iw. Only the ones in use. */
     na = 10 + 2 * ntc;
+    act[nact++] = 0;
+    if (!affine) act[nact++] = 1;
+    for (k = 2; k < 6; k++) act[nact++] = k;
     if (fast) {
-        act[nact++] = 0;
-        if (!affine) act[nact++] = 1;
-        for (k = 2; k < 6; k++) act[nact++] = k;
         if (fast != FAST_PASSCLR) { act[nact++] = 10 + 2 * fcoord; act[nact++] = 11 + 2 * fcoord; }
     } else {
-        for (k = 0; k < na; k++) act[nact++] = k;
+        for (i = 0; i < G.ntev; i++) {
+            const Stage *st = &G.st[i];
+            if (st->color == GX_COLOR1A1 || st->color == GX_COLOR1) use_col1 = 1;
+            if (st->map < 8 && st->coord < 8 && G.bound[st->map]) tcmask |= 1u << st->coord;
+        }
+        if (use_col1) for (k = 6; k < 10; k++) act[nact++] = k;
+        for (i = 0; i < ntc; i++) if (tcmask & (1u << i)) { act[nact++] = 10 + 2 * i; act[nact++] = 11 + 2 * i; }
     }
-    for (k = 0; k < na; k++) {
+    for (i = 0; i < nact; i++) {
         float q[3];
-        for (i = 0; i < 3; i++) {
-            const PV *pv = v[i];
-            float val;
-            if (k == 0) val = sz[i];
-            else if (k == 1) val = iw[i];
-            else if (k < 6) val = pv->col[0][k - 2] * iw[i];
-            else if (k < 10) val = pv->col[1][k - 6] * iw[i];
-            else val = pv->tc[(k - 10) >> 1][(k - 10) & 1] * iw[i];
-            q[i] = val;
+        int j;
+        k = act[i];
+        for (j = 0; j < 3; j++) {
+            const PV *pv = v[j];
+            if (k == 0) q[j] = sz[j];
+            else if (k == 1) q[j] = iw[j];
+            else if (k < 6) q[j] = pv->col[0][k - 2] * iw[j];
+            else if (k < 10) q[j] = pv->col[1][k - 6] * iw[j];
+            else q[j] = pv->tc[(k - 10) >> 1][(k - 10) & 1] * iw[j];
         }
         pl0[k] = (q[0] * e_row[0] + q[1] * e_row[1] + q[2] * e_row[2]) * inv_area;
         pldx[k] = (q[0] * dEx[0] + q[1] * dEx[1] + q[2] * dEx[2]) * inv_area;
         pldy[k] = (q[0] * dEy[0] + q[1] * dEy[1] + q[2] * dEy[2]) * inv_area;
     }
+    memset(col, 0, sizeof(col));
+    memset(tc, 0, sizeof(tc));
 
     for (y = y0; y < y1; y++) {
-        float e[3], cur[NA_MAX];
-        e[0] = e_row[0]; e[1] = e_row[1]; e[2] = e_row[2];
-        for (i = 0; i < nact; i++) cur[act[i]] = pl0[act[i]];
-        for (x = x0; x < x1; x++) {
-            if ((e[0] > 0.f || (e[0] == 0.f && tl0)) && (e[1] > 0.f || (e[1] == 0.f && tl1)) && (e[2] > 0.f || (e[2] == 0.f && tl2))) {
-                int idx = y * EFB_W + x;
-                float z = cur[0];
-                float invw = affine ? inv_iw_const : (cur[1] != 0.f ? 1.f / cur[1] : 0.f);
-                if (fast) {
-                    float res[4];
-                    G_stats.px_fast++;
-                    if (G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel;
-                    res[0] = cur[2] * invw; res[1] = cur[3] * invw; res[2] = cur[4] * invw; res[3] = cur[5] * invw;
+        int lo = 0, hi = x1 - x0, xa, xb;
+        edge_span(e_row[0], dEx[0], tl0, x1 - x0, &lo, &hi);
+        edge_span(e_row[1], dEx[1], tl1, x1 - x0, &lo, &hi);
+        edge_span(e_row[2], dEx[2], tl2, x1 - x0, &lo, &hi);
+        xa = x0 + lo;
+        xb = x0 + hi;
+        if (xa < xb) {
+            if (int_path) {
+                /* all-integer inner loop (flat/orthographic sprites): attributes in 16.16 fixed point */
+                float cs = inv_iw_const * 255.f * 65536.f;
+                int c[4], dc[4], u = 0, vv = 0, du = 0, dv = 0;
+                float zc = pl0[0] + pldx[0] * (float)lo, dz = pldx[0];
+                for (k = 0; k < 4; k++) { c[k] = (int)((pl0[2 + k] + pldx[2 + k] * (float)lo) * cs); dc[k] = (int)(pldx[2 + k] * cs); }
+                if (fast != FAST_PASSCLR) {
+                    float us = inv_iw_const * (float)ftex->w * 65536.f, vs = inv_iw_const * (float)ftex->h * 65536.f;
+                    u = (int)((pl0[10 + 2 * fcoord] + pldx[10 + 2 * fcoord] * (float)lo) * us);
+                    vv = (int)((pl0[11 + 2 * fcoord] + pldx[11 + 2 * fcoord] * (float)lo) * vs);
+                    du = (int)(pldx[10 + 2 * fcoord] * us);
+                    dv = (int)(pldx[11 + 2 * fcoord] * vs);
+                }
+                G_stats.px_fast += xb - xa;
+                for (x = xa; x < xb; x++, zc += dz, u += du, vv += dv, c[0] += dc[0], c[1] += dc[1], c[2] += dc[2], c[3] += dc[3]) {
+                    int idx = y * EFB_W + x;
+                    int r, g, b, a;
+                    u32 d, o;
+                    if (G.z_en && !cmp_ok(G.z_func, zc, G.depth[idx])) continue;
+                    r = c[0] >> 16; g = c[1] >> 16; b = c[2] >> 16; a = c[3] >> 16;
+                    r = r < 0 ? 0 : (r > 255 ? 255 : r); g = g < 0 ? 0 : (g > 255 ? 255 : g);
+                    b = b < 0 ? 0 : (b > 255 ? 255 : b); a = a < 0 ? 0 : (a > 255 ? 255 : a);
                     if (fast != FAST_PASSCLR) {
-                        float tx[4];
-                        fetch_fast(ftex, wmask, hmask, cur[10 + 2 * fcoord] * invw, cur[11 + 2 * fcoord] * invw, tx);
-                        if (fast == FAST_MODULATE) { res[0] *= tx[0]; res[1] *= tx[1]; res[2] *= tx[2]; res[3] *= tx[3]; }
-                        else { res[0] = tx[0]; res[1] = tx[1]; res[2] = tx[2]; res[3] = tx[3]; }
+                        u32 t = fetch_i(ftex, flinear, u, vv);
+                        int tr = (t >> 16) & 255, tg = (t >> 8) & 255, tb = t & 255, ta = t >> 24;
+                        if (fast == FAST_MODULATE) { r = mul8(r, tr); g = mul8(g, tg); b = mul8(b, tb); a = mul8(a, ta); }
+                        else { r = tr; g = tg; b = tb; a = ta; }
                     }
-                    if (G.z_upd) G.depth[idx] = z;
-                    if (nfast_blend == 1 && G.col_upd && G.a_upd) {
-                        u32 d = G.color[idx];
-                        float a = sat(res[3]), ia = 1.f - a;
-                        float r = sat(res[0]) * a + ((d >> 16) & 255) * (1.f / 255.f) * ia;
-                        float g = sat(res[1]) * a + ((d >> 8) & 255) * (1.f / 255.f) * ia;
-                        float b = sat(res[2]) * a + (d & 255) * (1.f / 255.f) * ia;
-                        float oa = a * a + (d >> 24) * (1.f / 255.f) * ia;
-                        G.color[idx] = pack((u8)(r * 255.f + 0.5f), (u8)(g * 255.f + 0.5f), (u8)(b * 255.f + 0.5f), (u8)(sat(oa) * 255.f + 0.5f));
-                    } else if (nfast_blend == 2 && G.col_upd && G.a_upd) {
-                        G.color[idx] = pack((u8)(sat(res[0]) * 255.f + 0.5f), (u8)(sat(res[1]) * 255.f + 0.5f), (u8)(sat(res[2]) * 255.f + 0.5f), (u8)(sat(res[3]) * 255.f + 0.5f));
+                    if (!alpha_trivial && !atest8(a)) continue;
+                    if (G.z_upd) G.depth[idx] = zc;
+                    if (nfast_blend == 1) {
+                        int ia = 255 - a, orr, og, ob, oa;
+                        d = G.color[idx];
+                        orr = mul8(r, a) + mul8((d >> 16) & 255, ia);
+                        og = mul8(g, a) + mul8((d >> 8) & 255, ia);
+                        ob = mul8(b, a) + mul8(d & 255, ia);
+                        oa = mul8(a, a) + mul8(d >> 24, ia);
+                        o = pack(orr > 255 ? 255 : orr, og > 255 ? 255 : og, ob > 255 ? 255 : ob, oa > 255 ? 255 : oa);
                     } else {
-                        G.depth[idx] = G.z_upd ? z : G.depth[idx]; /* depth already handled above; generic blend only */
-                        {
-                            /* generic blend/write without redoing the depth test */
-                            int z_en = G.z_en;
-                            G.z_en = 0;
-                            write_pixel(idx, z, res);
-                            G.z_en = z_en;
-                        }
+                        o = pack(r, g, b, a);
                     }
-                } else {
-                    float col[2][4], tc[8][2];
-                    int j;
-                    if (alpha_trivial && G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel; /* early Z */
-                    G_stats.px_general++;
-                    for (j = 0; j < 4; j++) { col[0][j] = cur[2 + j] * invw; col[1][j] = cur[6 + j] * invw; }
-                    for (j = 0; j < ntc; j++) { tc[j][0] = cur[10 + 2 * j] * invw; tc[j][1] = cur[11 + 2 * j] * invw; }
-                    shade_pixel(x, y, z, col, tc);
+                    G.color[idx] = o;
+                }
+            } else {
+                float cur[NA_MAX];
+                int ntcu = ntc;
+                for (i = 0; i < nact; i++) cur[act[i]] = pl0[act[i]] + pldx[act[i]] * (float)lo;
+                for (x = xa; x < xb; x++) {
+                    int idx = y * EFB_W + x;
+                    float z = cur[0];
+                    float invw = affine ? inv_iw_const : (cur[1] != 0.f ? 1.f / cur[1] : 0.f);
+                    if (fast) {
+                        float res[4];
+                        G_stats.px_fast++;
+                        if (G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel;
+                        res[0] = cur[2] * invw; res[1] = cur[3] * invw; res[2] = cur[4] * invw; res[3] = cur[5] * invw;
+                        if (fast != FAST_PASSCLR) {
+                            float tx[4];
+                            fetch_fast(ftex, ftex->wmask, ftex->hmask, cur[10 + 2 * fcoord] * invw, cur[11 + 2 * fcoord] * invw, tx);
+                            if (fast == FAST_MODULATE) { res[0] *= tx[0]; res[1] *= tx[1]; res[2] *= tx[2]; res[3] *= tx[3]; }
+                            else { res[0] = tx[0]; res[1] = tx[1]; res[2] = tx[2]; res[3] = tx[3]; }
+                        }
+                        if (!alpha_trivial && !atest8((int)(sat(res[3]) * 255.f + 0.5f))) goto next_pixel;
+                        if (G.z_upd) G.depth[idx] = z;
+                        if (nfast_blend == 1 && G.col_upd && G.a_upd) {
+                            u32 d = G.color[idx];
+                            float a = sat(res[3]), ia = 1.f - a;
+                            float r = sat(res[0]) * a + ((d >> 16) & 255) * (1.f / 255.f) * ia;
+                            float g = sat(res[1]) * a + ((d >> 8) & 255) * (1.f / 255.f) * ia;
+                            float b = sat(res[2]) * a + (d & 255) * (1.f / 255.f) * ia;
+                            float oa = a * a + (d >> 24) * (1.f / 255.f) * ia;
+                            G.color[idx] = pack((u8)(r * 255.f + 0.5f), (u8)(g * 255.f + 0.5f), (u8)(b * 255.f + 0.5f), (u8)(sat(oa) * 255.f + 0.5f));
+                        } else if (nfast_blend == 2 && G.col_upd && G.a_upd) {
+                            G.color[idx] = pack((u8)(sat(res[0]) * 255.f + 0.5f), (u8)(sat(res[1]) * 255.f + 0.5f), (u8)(sat(res[2]) * 255.f + 0.5f), (u8)(sat(res[3]) * 255.f + 0.5f));
+                        } else {
+                            int z_en = G.z_en, ac0 = G.ac0, ac1 = G.ac1;
+                            G.z_en = 0; G.ac0 = G.ac1 = GX_ALWAYS; /* depth and alpha test were already applied above */
+                            write_pixel(idx, z, res);
+                            G.z_en = z_en; G.ac0 = ac0; G.ac1 = ac1;
+                        }
+                    } else {
+                        int j;
+                        if (alpha_trivial && G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel; /* early Z */
+                        G_stats.px_general++;
+                        for (j = 0; j < 4; j++) col[0][j] = cur[2 + j] * invw;
+                        if (use_col1) for (j = 0; j < 4; j++) col[1][j] = cur[6 + j] * invw;
+                        for (j = 0; j < ntcu; j++) if (tcmask & (1u << j)) { tc[j][0] = cur[10 + 2 * j] * invw; tc[j][1] = cur[11 + 2 * j] * invw; }
+                        shade_pixel(x, y, z, col, tc);
+                    }
+                next_pixel:
+                    for (i = 0; i < nact; i++) cur[act[i]] += pldx[act[i]];
                 }
             }
-        next_pixel:
-            e[0] += dEx[0]; e[1] += dEx[1]; e[2] += dEx[2];
-            for (i = 0; i < nact; i++) cur[act[i]] += pldx[act[i]];
         }
         e_row[0] += dEy[0]; e_row[1] += dEy[1]; e_row[2] += dEy[2];
         for (i = 0; i < nact; i++) pl0[act[i]] += pldy[act[i]];
@@ -1801,6 +1996,7 @@ void GXCopyDisp(void *dest, GXBool clear)
     G.front_h = G.copy_h;
     G.frame_ready = 1;
     G.frames++;
+    vepoch++;
     if (clear) efb_clear();
 }
 
@@ -1834,9 +2030,10 @@ int port_gx_present(void)
         if (G_stats.frames >= 30) {
             u64 now = now_us();
             u64 wall = G_stats.t_last ? now - G_stats.t_last : 0;
-            OSReport("[gx] %u frames in %u ms: draw %u ms (%u tris, px fast %u / generic %u), tex decode %u ms (%u), present %u ms\n",
-                     G_stats.frames, (u32)(wall / 1000), (u32)(G_stats.t_draw / 1000), G_stats.tris, G_stats.px_fast, G_stats.px_general,
-                     (u32)(G_stats.t_decode / 1000), G_stats.tex_decodes, (u32)(G_stats.t_present / 1000));
+            OSReport("[gx] %u frames in %u ms: draw %u ms (%u tris, %u drawn; px fast %u / generic %u), tex decode %u ms (%u), present %u ms, vcache %u/%u, fast-reject ntev %u ops %u clamp %u color %u mode %u tex %u\n",
+                     G_stats.frames, (u32)(wall / 1000), (u32)(G_stats.t_draw / 1000), G_stats.tris, G_stats.tris_drawn, G_stats.px_fast, G_stats.px_general,
+                     (u32)(G_stats.t_decode / 1000), G_stats.tex_decodes, (u32)(G_stats.t_present / 1000), G_stats.vc_hit, G_stats.vc_miss,
+                     G_stats.fast_fail[1], G_stats.fast_fail[2], G_stats.fast_fail[3], G_stats.fast_fail[4], G_stats.fast_fail[5], G_stats.fast_fail[6]);
             memset(&G_stats, 0, sizeof(G_stats));
             G_stats.t_last = now;
         } else if (!G_stats.t_last) {
