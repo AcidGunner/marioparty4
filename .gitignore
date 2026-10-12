@@ -34,3 +34,7 @@ compile_commands.json
 # Miscellaneous
 /*.txt
 *.exe
+
+# remove patch files lol
+*.patch
+/*.patch

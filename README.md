@@ -11,15 +11,13 @@ Some more stuff
 --------
 Version Completion:
 
-- `GMPE01_00`: Rev 0 (USA) ❌
-- `GMPE01_01`: Rev 1 (USA) ✅ < currently being tested
-- `GMPP01_00`: Rev 0 (PAL) ❌
-- `GMPP01_01`: Rev 1 (PAL) ❌
-- `GMPP01_02`: Rev 2 (PAL) ❌
-- `GMPJ01_00`: Rev 0 (JP)  ❌
+- `GMPE01_00`: Rev 0 (USA) < untested
+- `GMPE01_01`: Rev 1 (USA) < currently testing
 
 Dependencies
 ============
+
+Get [PS3DEV](https://github.com/ps3dev/ps3dev) and it's dependencies.
 
 Windows
 --------

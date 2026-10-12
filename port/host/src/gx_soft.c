@@ -18,9 +18,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
-#define EFB_W 640
-#define EFB_H 528
+/* Internal render resolution divisor: 1 = full 640x480, 2 = half (320x240, upscaled by the video layer).
+ * The PS3 defaults to 2 until the rasterizer is faster; override with -DGX_DIV=1. */
+#ifndef GX_DIV
+#ifdef PORT_PS3
+#define GX_DIV 2
+#else
+#define GX_DIV 1
+#endif
+#endif
+#define EFB_W (640 / GX_DIV)
+#define EFB_H (528 / GX_DIV)
 #define MAXTEV 16
 
 _Static_assert(GX_CC_RASC == 10 && GX_CC_ZERO == 15 && GX_CC_TEXC == 8, "TEV colour arg enum");
@@ -56,6 +67,7 @@ typedef struct {
     u32 *rgba;
     int w, h;
     u8 ws, wt;
+    int wmask, hmask; /* w-1 / h-1 when a power of two, else -1 */
 } Tex;
 
 typedef struct {
@@ -110,10 +122,24 @@ static struct {
     float clear_z;
     /* copy / present */
     u32 *front;
-    int copy_w, copy_h, front_w, front_h;
+    int copy_w, copy_h, copy_h_real, front_w, front_h;
     int frame_ready;
     u32 frames;
 } G;
+
+
+/* ---- statistics, printed once per ~2 seconds of presented frames ---- */
+static struct {
+    u32 tex_decodes, tris, px_fast, px_general, frames;
+    u64 t_draw, t_present, t_decode, t_last;
+} G_stats;
+
+static u64 now_us(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (u64)tv.tv_sec * 1000000ull + tv.tv_usec;
+}
 
 static GXFifoObj fifo_dummy;
 
@@ -157,11 +183,11 @@ static void gx_ensure_init(void)
     G.proj[2][2] = -1.f; /* arbitrary sane default */
     G.proj[3][3] = 1.f;
     G.vp[0] = G.vp[1] = 0.f;
-    G.vp[2] = 640.f;
-    G.vp[3] = 480.f;
+    G.vp[2] = 640.f / GX_DIV;
+    G.vp[3] = 480.f / GX_DIV;
     G.vp[4] = 0.f;
     G.vp[5] = 1.f;
-    G.sc[0] = 0; G.sc[1] = 0; G.sc[2] = 640; G.sc[3] = 480;
+    G.sc[0] = 0; G.sc[1] = 0; G.sc[2] = 640 / GX_DIV; G.sc[3] = 480 / GX_DIV;
     for (i = 0; i < 4; i++) {
         G.chan[i].mat_src = GX_SRC_REG;
         G.chan[i].amb_src = GX_SRC_REG;
@@ -184,8 +210,9 @@ static void gx_ensure_init(void)
     G.ac0 = G.ac1 = GX_ALWAYS;
     G.aop = GX_AOP_AND;
     G.clear_z = 1.f;
-    G.copy_w = 640;
-    G.copy_h = 480;
+    G.copy_w = 640 / GX_DIV;
+    G.copy_h = 480 / GX_DIV;
+    G.copy_h_real = 480;
     G.inited = 1;
     efb_clear();
 }
@@ -201,13 +228,14 @@ typedef struct {
     int used;
 } TexCache;
 
-#define TEXCACHE_N 96
-#define TEXCACHE_MAX_BYTES (32u * 1024 * 1024)
+#define TEXCACHE_N 512
+#define TEXCACHE_MAX_BYTES (48u * 1024 * 1024)
 static TexCache tcache[TEXCACHE_N];
 static int tcache_next;
 static u32 tcache_bytes;
 
-typedef struct { u32 *rgba; int n; u32 gen; } TlutSlot;
+static u64 sample_hash(const u8 *p, u32 size);
+typedef struct { u32 *rgba; int n; u32 gen; u64 hash; } TlutSlot;
 static TlutSlot tluts[32];
 
 static u8 e5to8(u32 v) { return (u8)((v << 3) | (v >> 2)); }
@@ -422,8 +450,11 @@ static Tex *tex_lookup(const TexObjD *o)
     c->tlut = tl < 0 ? 0 : tl;
     c->tlut_gen = gen;
     c->key_hash = hash;
-    decode_tex(&c->tex, ptr, o->w, o->h, o->fmt, tl);
+    { u64 d0 = now_us(); decode_tex(&c->tex, ptr, o->w, o->h, o->fmt, tl); G_stats.t_decode += now_us() - d0; }
     if (!c->tex.rgba) { c->used = 0; return NULL; }
+    c->tex.wmask = ((o->w & (o->w - 1)) == 0) ? o->w - 1 : -1;
+    c->tex.hmask = ((o->h & (o->h - 1)) == 0) ? o->h - 1 : -1;
+    G_stats.tex_decodes++;
     tcache_bytes += (u32)o->w * o->h * 4;
     return &c->tex;
 }
@@ -466,10 +497,17 @@ void GXLoadTlut(GXTlutObj *tlut_obj, u32 tlut_name)
     TlutObjD *t = (TlutObjD *)tlut_obj;
     const u8 *src = (const u8 *)(uintptr_t)(((u64)t->ptr_hi << 32) | t->ptr_lo);
     TlutSlot *s = &tluts[tlut_name & 31];
+    u32 n = t->n ? t->n : 1;
+    u64 h;
     if (!src) return;
+    /* The game loads a palette before every paletted draw. Only touch the decoded textures when it really changed,
+       otherwise every CI texture would be re-decoded on every draw. */
+    h = sample_hash(src, n * 2) ^ ((u64)t->fmt << 56) ^ n;
+    if (s->rgba && s->n == (int)t->n && s->hash == h) return;
     free(s->rgba);
-    s->rgba = (u32 *)calloc(t->n ? t->n : 1, 4);
+    s->rgba = (u32 *)calloc(n, 4);
     s->n = t->n;
+    s->hash = h;
     s->gen++;
     if (s->rgba) tlut_entry_convert(s->rgba, src, t->n, t->fmt);
 }
@@ -546,7 +584,7 @@ GXFifoObj *GXInit(void *base, u32 size)
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz)
 {
     gx_ensure_init();
-    G.vp[0] = left; G.vp[1] = top; G.vp[2] = wd; G.vp[3] = ht; G.vp[4] = nearz; G.vp[5] = farz;
+    G.vp[0] = left / GX_DIV; G.vp[1] = top / GX_DIV; G.vp[2] = wd / GX_DIV; G.vp[3] = ht / GX_DIV; G.vp[4] = nearz; G.vp[5] = farz;
 }
 
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) { GXSetViewport(left, top, wd, ht, nearz, farz); }
@@ -554,7 +592,7 @@ void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz,
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht)
 {
     gx_ensure_init();
-    G.sc[0] = left; G.sc[1] = top; G.sc[2] = wd; G.sc[3] = ht;
+    G.sc[0] = left / GX_DIV; G.sc[1] = top / GX_DIV; G.sc[2] = (wd + GX_DIV - 1) / GX_DIV; G.sc[3] = (ht + GX_DIV - 1) / GX_DIV;
 }
 
 void GXSetProjection(const void *mtx, GXProjectionType type)
@@ -975,9 +1013,11 @@ static void slot_done(void)
     }
 }
 
+static u64 prim_t0;
 static void begin_prim(int prim, int fmt)
 {
     int i, j;
+    prim_t0 = now_us();
     A.in_prim = 1; A.prim = prim; A.fmt = fmt & 7; A.nbuf = 0; A.parity = 0;
     A.slot = next_slot(0);
     memset(&A.raw, 0, sizeof(A.raw));
@@ -1126,7 +1166,10 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts)
     begin_prim(type, vtxfmt);
 }
 
-void GXEnd(void) { if (!A.recording) A.in_prim = 0; }
+void GXEnd(void)
+{
+    if (!A.recording) { if (A.in_prim) G_stats.t_draw += now_us() - prim_t0; A.in_prim = 0; }
+}
 
 void GXPosition3f32(f32 x, f32 y, f32 z) { VERTEX_FLOATS(3, x, y, z); }
 void GXPosition3u16(u16 x, u16 y, u16 z) { VERTEX_INTS(u16, 3, x, y, z); }
@@ -1229,6 +1272,7 @@ static const u8 *dl_read_attr(const u8 *p, int attr)
 void GXCallDisplayList(const void *list, u32 nbytes)
 {
     const u8 *p = (const u8 *)list, *end = p + nbytes;
+    u64 t0 = now_us();
     gx_ensure_init();
     while (p < end) {
         u8 cmd = *p++;
@@ -1249,6 +1293,7 @@ void GXCallDisplayList(const void *list, u32 nbytes)
         }
         break; /* unknown command: stop */
     }
+    G_stats.t_draw += now_us() - t0;
 }
 
 /* ------------------------------------------------------------------------------------------------ clipping + raster */
@@ -1309,6 +1354,55 @@ static int cmp_ok(int func, float a, float b)
         case GX_GEQUAL: return a >= b;
         default: return 1;
     }
+}
+
+static inline int ffloor(float f) { int i = (int)f; return (f < (float)i) ? i - 1 : i; }
+
+static inline int wrap_fast(int i, int n, int mask, int mode)
+{
+    if (mode == GX_CLAMP) return i < 0 ? 0 : (i >= n ? n - 1 : i);
+    if (mode == GX_REPEAT && mask >= 0) return i & mask;
+    return wrap_i(i, n, mode);
+}
+
+/* returns texel as 4 floats 0..1 */
+static inline void fetch_fast(const Tex *t, int wmask, int hmask, float s, float tt, float out[4])
+{
+    int ws = t->ws & 3, wt = t->wt & 3;
+    float u = s * t->w, v = tt * t->h;
+    const float k = 1.f / 255.f;
+    u32 c;
+    if (t->ws & 0x80) {
+        float fu = u - 0.5f, fv = v - 0.5f;
+        int x0 = ffloor(fu), y0 = ffloor(fv);
+        int ax = (int)((fu - x0) * 256.f), ay = (int)((fv - y0) * 256.f);
+        int x1, y1;
+        u32 c00, c10, c01, c11;
+        int sh;
+        /* snap to the nearest texel when within ~1% of a texel centre (1:1 sprites): one fetch instead of four */
+        if (ax <= 2) ax = 0; else if (ax >= 254) { ax = 0; x0++; }
+        if (ay <= 2) ay = 0; else if (ay >= 254) { ay = 0; y0++; }
+        if ((ax | ay) == 0) {
+            c = t->rgba[wrap_fast(y0, t->h, hmask, wt) * t->w + wrap_fast(x0, t->w, wmask, ws)];
+            out[0] = ((c >> 16) & 255) * k; out[1] = ((c >> 8) & 255) * k; out[2] = (c & 255) * k; out[3] = (c >> 24) * k;
+            return;
+        }
+        x1 = wrap_fast(x0 + 1, t->w, wmask, ws);
+        y1 = wrap_fast(y0 + 1, t->h, hmask, wt);
+        x0 = wrap_fast(x0, t->w, wmask, ws);
+        y0 = wrap_fast(y0, t->h, hmask, wt);
+        c00 = t->rgba[y0 * t->w + x0]; c10 = t->rgba[y0 * t->w + x1];
+        c01 = t->rgba[y1 * t->w + x0]; c11 = t->rgba[y1 * t->w + x1];
+        for (sh = 0; sh < 4; sh++) {
+            int shf = sh == 3 ? 24 : (16 - 8 * sh);
+            int a = (c00 >> shf) & 255, b = (c10 >> shf) & 255, cc = (c01 >> shf) & 255, d = (c11 >> shf) & 255;
+            int top = a * 256 + (b - a) * ax, bot = cc * 256 + (d - cc) * ax;
+            out[sh] = ((top * 256 + (bot - top) * ay) >> 16) * k;
+        }
+        return;
+    }
+    c = t->rgba[wrap_fast(ffloor(v), t->h, hmask, wt) * t->w + wrap_fast(ffloor(u), t->w, wmask, ws)];
+    out[0] = ((c >> 16) & 255) * k; out[1] = ((c >> 8) & 255) * k; out[2] = (c & 255) * k; out[3] = (c >> 24) * k;
 }
 
 static void write_pixel(int idx, float z, const float res[4])
@@ -1386,7 +1480,7 @@ static void shade_pixel(int px, int py, float z, const float col[2][4], const fl
         float texc[4] = { 0, 0, 0, 0 }, ras[4] = { 0, 0, 0, 0 };
         float cin[4][3], ain[4], out[4];
         float kc[3], ka;
-        if (st->map < 8 && st->coord < 8 && G.bound[st->map] && G.bound[st->map]->rgba) sample_tex(G.bound[st->map], tc[st->coord][0], tc[st->coord][1], texc);
+        if (st->map < 8 && st->coord < 8 && G.bound[st->map] && G.bound[st->map]->rgba) fetch_fast(G.bound[st->map], G.bound[st->map]->wmask, G.bound[st->map]->hmask, tc[st->coord][0], tc[st->coord][1], texc);
         if (st->color == GX_COLOR0A0 || st->color == GX_COLOR0) memcpy(ras, col[0], sizeof(ras));
         else if (st->color == GX_COLOR1A1 || st->color == GX_COLOR1) memcpy(ras, col[1], sizeof(ras));
         {
@@ -1502,60 +1596,12 @@ static int fast_select(void)
     return FAST_NONE;
 }
 
-static inline int ffloor(float f) { int i = (int)f; return (f < (float)i) ? i - 1 : i; }
-
-static inline int wrap_fast(int i, int n, int mask, int mode)
-{
-    if (mode == GX_CLAMP) return i < 0 ? 0 : (i >= n ? n - 1 : i);
-    if (mode == GX_REPEAT && mask >= 0) return i & mask;
-    return wrap_i(i, n, mode);
-}
-
-/* returns texel as 4 floats 0..1 */
-static inline void fetch_fast(const Tex *t, int wmask, int hmask, float s, float tt, float out[4])
-{
-    int ws = t->ws & 3, wt = t->wt & 3;
-    float u = s * t->w, v = tt * t->h;
-    const float k = 1.f / 255.f;
-    u32 c;
-    if (t->ws & 0x80) {
-        float fu = u - 0.5f, fv = v - 0.5f;
-        int x0 = ffloor(fu), y0 = ffloor(fv);
-        int ax = (int)((fu - x0) * 256.f), ay = (int)((fv - y0) * 256.f);
-        int x1, y1;
-        u32 c00, c10, c01, c11;
-        int sh;
-        /* snap to the nearest texel when within ~1% of a texel centre (1:1 sprites): one fetch instead of four */
-        if (ax <= 2) ax = 0; else if (ax >= 254) { ax = 0; x0++; }
-        if (ay <= 2) ay = 0; else if (ay >= 254) { ay = 0; y0++; }
-        if ((ax | ay) == 0) {
-            c = t->rgba[wrap_fast(y0, t->h, hmask, wt) * t->w + wrap_fast(x0, t->w, wmask, ws)];
-            out[0] = ((c >> 16) & 255) * k; out[1] = ((c >> 8) & 255) * k; out[2] = (c & 255) * k; out[3] = (c >> 24) * k;
-            return;
-        }
-        x1 = wrap_fast(x0 + 1, t->w, wmask, ws);
-        y1 = wrap_fast(y0 + 1, t->h, hmask, wt);
-        x0 = wrap_fast(x0, t->w, wmask, ws);
-        y0 = wrap_fast(y0, t->h, hmask, wt);
-        c00 = t->rgba[y0 * t->w + x0]; c10 = t->rgba[y0 * t->w + x1];
-        c01 = t->rgba[y1 * t->w + x0]; c11 = t->rgba[y1 * t->w + x1];
-        for (sh = 0; sh < 4; sh++) {
-            int shf = sh == 3 ? 24 : (16 - 8 * sh);
-            int a = (c00 >> shf) & 255, b = (c10 >> shf) & 255, cc = (c01 >> shf) & 255, d = (c11 >> shf) & 255;
-            int top = a * 256 + (b - a) * ax, bot = cc * 256 + (d - cc) * ax;
-            out[sh] = ((top * 256 + (bot - top) * ay) >> 16) * k;
-        }
-        return;
-    }
-    c = t->rgba[wrap_fast(ffloor(v), t->h, hmask, wt) * t->w + wrap_fast(ffloor(u), t->w, wmask, ws)];
-    out[0] = ((c >> 16) & 255) * k; out[1] = ((c >> 8) & 255) * k; out[2] = (c & 255) * k; out[3] = (c >> 24) * k;
-}
-
 #define NA_MAX 28
 
 static void raster_tri(PV *v0, PV *v1, PV *v2)
 {
     PV *v[3] = { v0, v1, v2 };
+    G_stats.tris++;
     float sx[3], sy[3], sz[3], iw[3];
     float area, minx, maxx, miny, maxy;
     int x0, x1, y0, y1, x, y, i, k, tl0, tl1, tl2;
@@ -1565,7 +1611,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     float inv_area, iw_const = 1.f;
     float dEx[3], dEy[3], e_row[3];
     float pl0[NA_MAX], pldx[NA_MAX], pldy[NA_MAX];
-    int nfast_blend;
+    int nfast_blend, alpha_trivial;
     int act[NA_MAX], nact = 0;
     float inv_iw_const = 1.f;
     for (i = 0; i < 3; i++) {
@@ -1626,11 +1672,12 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     if (affine) { iw_const = iw[0]; inv_iw_const = 1.f / iw_const; }
     ntc = G.ntexgens < 8 ? G.ntexgens : 8;
     fast = fast_select();
+    alpha_trivial = (G.ac0 == GX_ALWAYS && G.ac1 == GX_ALWAYS && (G.aop == GX_AOP_AND || G.aop == GX_AOP_OR));
     if (fast == FAST_MODULATE || fast == FAST_REPLACE) {
         ftex = G.bound[G.st[0].map];
         fcoord = G.st[0].coord;
-        if (((ftex->w & (ftex->w - 1)) == 0)) wmask = ftex->w - 1;
-        if (((ftex->h & (ftex->h - 1)) == 0)) hmask = ftex->h - 1;
+        wmask = ftex->wmask;
+        hmask = ftex->hmask;
     }
     nfast_blend = (G.bl_type == GX_BM_BLEND && G.bl_src == GX_BL_SRCALPHA && G.bl_dst == GX_BL_INVSRCALPHA) ? 1 : (G.bl_type == GX_BM_NONE ? 2 : 0);
 
@@ -1672,6 +1719,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
                 float invw = affine ? inv_iw_const : (cur[1] != 0.f ? 1.f / cur[1] : 0.f);
                 if (fast) {
                     float res[4];
+                    G_stats.px_fast++;
                     if (G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel;
                     res[0] = cur[2] * invw; res[1] = cur[3] * invw; res[2] = cur[4] * invw; res[3] = cur[5] * invw;
                     if (fast != FAST_PASSCLR) {
@@ -1704,6 +1752,8 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
                 } else {
                     float col[2][4], tc[8][2];
                     int j;
+                    if (alpha_trivial && G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel; /* early Z */
+                    G_stats.px_general++;
                     for (j = 0; j < 4; j++) { col[0][j] = cur[2 + j] * invw; col[1][j] = cur[6 + j] * invw; }
                     for (j = 0; j < ntc; j++) { tc[j][0] = cur[10 + 2 * j] * invw; tc[j][1] = cur[11 + 2 * j] * invw; }
                     shade_pixel(x, y, z, col, tc);
@@ -1729,14 +1779,15 @@ void GXSetCopyClear(GXColor c, u32 z)
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht)
 {
     gx_ensure_init();
-    G.copy_w = wd > EFB_W ? EFB_W : wd;
-    G.copy_h = ht > EFB_H ? EFB_H : ht;
+    G.copy_w = (wd / GX_DIV) > EFB_W ? EFB_W : (wd / GX_DIV);
+    G.copy_h = (ht / GX_DIV) > EFB_H ? EFB_H : (ht / GX_DIV);
+    G.copy_h_real = ht;
 }
 
 u32 GXSetDispCopyYScale(f32 vscale)
 {
     gx_ensure_init();
-    return (u32)(G.copy_h * vscale);
+    return (u32)(G.copy_h_real * vscale);
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {}
@@ -1775,8 +1826,22 @@ __attribute__((weak)) void port_video_present(const u32 *argb, int w, int h) {}
 int port_gx_present(void)
 {
     if (G.inited && G.frame_ready) {
+        u64 t0 = now_us();
         G.frame_ready = 0;
         port_video_present(G.front, G.front_w, G.front_h);
+        G_stats.t_present += now_us() - t0;
+        G_stats.frames++;
+        if (G_stats.frames >= 30) {
+            u64 now = now_us();
+            u64 wall = G_stats.t_last ? now - G_stats.t_last : 0;
+            OSReport("[gx] %u frames in %u ms: draw %u ms (%u tris, px fast %u / generic %u), tex decode %u ms (%u), present %u ms\n",
+                     G_stats.frames, (u32)(wall / 1000), (u32)(G_stats.t_draw / 1000), G_stats.tris, G_stats.px_fast, G_stats.px_general,
+                     (u32)(G_stats.t_decode / 1000), G_stats.tex_decodes, (u32)(G_stats.t_present / 1000));
+            memset(&G_stats, 0, sizeof(G_stats));
+            G_stats.t_last = now;
+        } else if (!G_stats.t_last) {
+            G_stats.t_last = now_us();
+        }
         return 1;
     }
     return 0;
