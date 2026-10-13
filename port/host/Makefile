@@ -34,7 +34,7 @@ stubs: $(GAME_OBJ) $(REL_OBJ)
 	@nm -u $(GAME_OBJ) $(REL_OBJ) | awk '{print $$2}' | sort -u > $(OUT)/undef.txt
 	@nm -g --defined-only $(GAME_OBJ) | awk 'NF==3{print $$3}' | sort -u > $(OUT)/def.txt
 	@comm -23 $(OUT)/undef.txt $(OUT)/def.txt | grep -E '^(__)?(GX|OS|PAD|VI|DVD|AI|AR|ARQ|CARD|THP|DC|LC|SI|msm|DEMO|PPC)' > $(OUT)/sdk_symbols.txt
-	python3 port/host/tools/gen_stubs.py . $(OUT)/sdk_symbols.txt port/host/src/sdk_host.c port/host/src/dvd_host.c port/host/src/aram_host.c port/host/src/gx_soft.c > port/host/src/sdk_stubs_generated.c
+	python3 port/host/tools/gen_stubs.py . $(OUT)/sdk_symbols.txt port/host/src/sdk_host.c port/host/src/dvd_host.c port/host/src/aram_host.c port/host/src/gx_soft.c port/ps3/src/pad_ps3.c > port/host/src/sdk_stubs_generated.c
 
 # Links with unresolved symbols tolerated so you can see how far it gets; the report lists what's missing.
 link: $(GAME_OBJ) $(SHIM_OBJ)

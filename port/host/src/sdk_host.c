@@ -128,6 +128,26 @@ static u32 retrace_count;
 void VIInit(void) {}
 extern int port_gx_present(void);
 
+/* The game polls its pads from a vertical-retrace callback (HuPadInit -> VISetPostRetraceCallback(PadReadVSync)).
+ * On hardware that fires from an interrupt; here it is called once per frame from VIWaitForRetrace.
+ * The pre-retrace callback (HuDvdErrDispIntFunc) only wakes the DVD-error/soft-reset thread, which does not exist on
+ * this port, so it is remembered but not fired. */
+static VIRetraceCallback port_pre_retrace_cb, port_post_retrace_cb;
+
+VIRetraceCallback VISetPreRetraceCallback(VIRetraceCallback callback)
+{
+    VIRetraceCallback old = port_pre_retrace_cb;
+    port_pre_retrace_cb = callback;
+    return old;
+}
+
+VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback)
+{
+    VIRetraceCallback old = port_post_retrace_cb;
+    port_post_retrace_cb = callback;
+    return old;
+}
+
 void VIWaitForRetrace(void)
 {
     /* If a new frame was handed to the video layer, its (vsynced) flip already paced us; otherwise sleep one frame. */
@@ -140,16 +160,19 @@ void VIWaitForRetrace(void)
 #endif
     }
     retrace_count++;
+    if (port_post_retrace_cb) port_post_retrace_cb(retrace_count);
 }
 u32 VIGetRetraceCount(void) { return retrace_count; }
 u32 VIGetNextField(void) { return retrace_count & 1; }
 
-/* ---- pad: no controller until an input backend exists ---- */
+/* ---- pad: the PS3 build has a real backend (port/ps3/src/pad_ps3.c); other builds report no controller ---- */
+void SISetSamplingRate(u32 msecs) {}
+
+#ifndef PORT_PS3
 BOOL PADInit(void) { return TRUE; }
 BOOL PADReset(u32 mask) { return TRUE; }
 void PADSetSpec(u32 spec) {}
 void PADControlMotor(s32 chan, u32 cmd) {}
-void SISetSamplingRate(u32 msecs) {}
 
 u32 PADRead(PADStatus *status)
 {
@@ -160,6 +183,7 @@ u32 PADRead(PADStatus *status)
 }
 
 void PADClamp(PADStatus *status) {}
+#endif
 
 /* ---- standard GX render modes (from the Dolphin SDK tables) ---- */
 #define GX_SP { {6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6},{6,6} }

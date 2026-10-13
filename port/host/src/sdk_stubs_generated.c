@@ -97,8 +97,6 @@ u32 VIGetDTVStatus(void) { PORT_STUB("VIGetDTVStatus"); u32 r; memset(&r, 0, siz
 u32 VIGetTvFormat(void) { PORT_STUB("VIGetTvFormat"); u32 r; memset(&r, 0, sizeof(r)); return r; }
 void VISetBlack(BOOL black) { PORT_STUB("VISetBlack"); }
 void VISetNextFrameBuffer(void* fb) { PORT_STUB("VISetNextFrameBuffer"); }
-VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) { PORT_STUB("VISetPostRetraceCallback"); VIRetraceCallback r; memset(&r, 0, sizeof(r)); return r; }
-VIRetraceCallback VISetPreRetraceCallback(VIRetraceCallback callback) { PORT_STUB("VISetPreRetraceCallback"); VIRetraceCallback r; memset(&r, 0, sizeof(r)); return r; }
 void msmMusFdoutEnd(void) { PORT_STUB("msmMusFdoutEnd"); }
 s32 msmMusGetMidiCtrl(int musNo, s32 channel, s32 ctrl) { PORT_STUB("msmMusGetMidiCtrl"); s32 r; memset(&r, 0, sizeof(r)); return r; }
 s32 msmMusGetNumPlay(BOOL baseGrp) { PORT_STUB("msmMusGetNumPlay"); s32 r; memset(&r, 0, sizeof(r)); return r; }
