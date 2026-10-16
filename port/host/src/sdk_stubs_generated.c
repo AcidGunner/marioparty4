@@ -128,6 +128,7 @@ void msmStreamStopAll(s32 speed) { PORT_STUB("msmStreamStopAll"); }
 void msmSysCheckInit(void) { PORT_STUB("msmSysCheckInit"); }
 s32 msmSysDelGroupAll(void) { PORT_STUB("msmSysDelGroupAll"); s32 r; memset(&r, 0, sizeof(r)); return r; }
 s32 msmSysDelGroupBase(s32 grpNum) { PORT_STUB("msmSysDelGroupBase"); s32 r; memset(&r, 0, sizeof(r)); return r; }
+s32 msmSysGetOutputMode(void) { PORT_STUB("msmSysGetOutputMode"); s32 r; memset(&r, 0, sizeof(r)); return r; }
 s32 msmSysGetSampSize(BOOL baseGrp) { PORT_STUB("msmSysGetSampSize"); s32 r; memset(&r, 0, sizeof(r)); return r; }
 s32 msmSysInit(MSM_INIT *init, MSM_ARAM *aram) { PORT_STUB("msmSysInit"); s32 r; memset(&r, 0, sizeof(r)); return r; }
 s32 msmSysLoadGroupBase(s32 arg0, void *arg1) { PORT_STUB("msmSysLoadGroupBase"); s32 r; memset(&r, 0, sizeof(r)); return r; }

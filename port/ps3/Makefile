@@ -29,7 +29,7 @@ SKIP		:= jmp kerent
 
 # Overlays linked statically into the ELF. Each name is a directory in src/REL (case as on disk).
 # Start with bootDll; add more once the previous ones run (RELs that use board_executor.c need a variant of rel_executor.c).
-PORT_RELS	?= bootDll # todo: add modeseldll support
+PORT_RELS	?= bootDll modeseldll
 
 lc = $(shell echo $(1) | tr 'A-Z' 'a-z')
 REL_BIN		:= $(PS3DEV)/ppu/bin/ppu-

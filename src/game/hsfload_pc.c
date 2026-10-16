@@ -108,7 +108,7 @@ void HuHsfFree(HSFDATA *hsf)
             return;
         }
     }
-    OSReport("hsfload: HuHsfFree(%p): unknown model, freeing as raw block\n", (void *)hsf);
+    /* not one of ours: a Hu3DModelLink() copy, which is a plain heap block */
     HuMemDirectFree(hsf);
 }
 

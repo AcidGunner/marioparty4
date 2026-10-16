@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 #include <time.h>
 #include <sys/time.h>
 
@@ -115,7 +116,8 @@ static struct {
     u32 *color;
     float *depth;
     u32 clear_color;
-    float clear_z;
+    float clear_z, depth_fill_z;
+    int depth_dirty;
     /* copy / present */
     u32 *front;
     int copy_w, copy_h, copy_h_real, front_w, front_h;
@@ -127,6 +129,8 @@ static struct {
 /* ---- statistics, printed once per ~2 seconds of presented frames ---- */
 static struct {
     u32 tex_decodes, tris, tris_drawn, px_fast, px_general, frames, vc_hit, vc_miss, fast_fail[8];
+    u8 pat[6][16];
+    u32 pat_n[6];
     u64 t_draw, t_present, t_decode, t_last;
 } G_stats;
 
@@ -147,10 +151,15 @@ static float sat(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
 static void efb_clear(void)
 {
-    int i;
-    for (i = 0; i < EFB_W * EFB_H; i++) {
-        G.color[i] = G.clear_color;
-        G.depth[i] = G.clear_z;
+    /* colour: 64-bit stores; depth: only if something wrote to it since the last fill (2D-only frames never do) */
+    u64 v = ((u64)G.clear_color << 32) | G.clear_color;
+    u64 *c = (u64 *)G.color;
+    int i, n = EFB_W * EFB_H / 2;
+    for (i = 0; i < n; i++) c[i] = v;
+    if (G.depth_dirty || G.depth_fill_z != G.clear_z) {
+        for (i = 0; i < EFB_W * EFB_H; i++) G.depth[i] = G.clear_z;
+        G.depth_dirty = 0;
+        G.depth_fill_z = G.clear_z;
     }
 }
 
@@ -165,9 +174,14 @@ static void gx_ensure_init(void)
     int i;
     if (G.inited) return;
     memset(&G, 0, sizeof(G));
-    G.color = (u32 *)calloc(EFB_W * EFB_H, 4);
-    G.depth = (float *)calloc(EFB_W * EFB_H, 4);
-    G.front = (u32 *)calloc(EFB_W * EFB_H, 4);
+    /* cache-line aligned: the pixel loops stream through these and the PPU pays dearly for split lines */
+    G.color = (u32 *)memalign(128, EFB_W * EFB_H * 4);
+    G.depth = (float *)memalign(128, EFB_W * EFB_H * 4);
+    G.front = (u32 *)memalign(128, EFB_W * EFB_H * 4);
+    if (G.color) memset(G.color, 0, EFB_W * EFB_H * 4);
+    if (G.depth) memset(G.depth, 0, EFB_W * EFB_H * 4);
+    if (G.front) memset(G.front, 0, EFB_W * EFB_H * 4);
+    G.depth_fill_z = -1.f; /* force the first depth fill */
     if (!G.color || !G.depth || !G.front) {
         OSReport("gx_soft: out of memory for the EFB\n");
         OSPanic("gx_soft.c", __LINE__, "EFB alloc failed\n");
@@ -1364,8 +1378,14 @@ static void tri_clip(const PV *a, const PV *b, const PV *c)
     int n, i;
     int in_a = (a->cz + a->cw >= 0.f && a->cz <= 0.f), in_b = (b->cz + b->cw >= 0.f && b->cz <= 0.f), in_c = (c->cz + c->cw >= 0.f && c->cz <= 0.f);
     if (in_a && in_b && in_c) {
-        PV t0 = *a, t1 = *b, t2 = *c;
-        raster_tri(&t0, &t1, &t2);
+        if (G.cull != GX_CULL_NONE && a->cw > 0.f && b->cw > 0.f && c->cw > 0.f) {
+            /* Facing from the 3x3 determinant of the clip-space (x, y, w) rows: no divides needed. With w > 0 the
+               sign equals the orientation in normalised device space (y up); positive = counter-clockwise = front. */
+            float det = a->cx * (b->cy * c->cw - c->cy * b->cw) - a->cy * (b->cx * c->cw - c->cx * b->cw) + a->cw * (b->cx * c->cy - c->cx * b->cy);
+            if (det == 0.f) { G_stats.tris++; return; }
+            if ((G.cull == GX_CULL_BACK && det < 0.f) || (G.cull == GX_CULL_FRONT && det > 0.f) || G.cull == GX_CULL_ALL) { G_stats.tris++; return; }
+        }
+        raster_tri((PV *)a, (PV *)b, (PV *)c); /* raster_tri only reads the vertices */
         return;
     }
     p0[0] = *a; p0[1] = *b; p0[2] = *c;
@@ -1373,10 +1393,7 @@ static void tri_clip(const PV *a, const PV *b, const PV *c)
     if (n < 3) return;
     n = clip_plane(p1, n, p0, 1);
     if (n < 3) return;
-    for (i = 1; i + 1 < n; i++) {
-        PV t0 = p0[0], t1 = p0[i], t2 = p0[i + 1];
-        raster_tri(&t0, &t1, &t2);
-    }
+    for (i = 1; i + 1 < n; i++) raster_tri(&p0[0], &p0[i], &p0[i + 1]);
 }
 
 static int cmp_ok(int func, float a, float b)
@@ -1506,93 +1523,84 @@ static void write_pixel(int idx, float z, const float res[4])
 
 static void shade_pixel(int px, int py, float z, const float col[2][4], const float tc[8][2])
 {
-    float prev[4], regs[4][4];
-    int s, k;
+    /* Sources are indexed by the GX_CC_* / GX_CA_* enum values themselves, so inputs are plain table lookups:
+       colour args: 0 CPREV 1 APREV 2 C0 3 A0 4 C1 5 A1 6 C2 7 A2 8 TEXC 9 TEXA 10 RASC 11 RASA 12 ONE 13 HALF 14 KONST 15 ZERO
+       alpha args:  0 APREV 1 A0 2 A1 3 A2 4 TEXA 5 RASA 6 KONST 7 ZERO
+       The four TEV registers (prev, r0, r1, r2) live directly in S[0,2,4,6] (rgb) / SA[0..3] (alpha). */
+    float S[16][3];
+    float SA[8];
     float res[4];
+    int s, k, r;
     int idx = py * EFB_W + px;
-    memcpy(regs, G.reg, sizeof(regs));
-    memcpy(prev, regs[0], sizeof(prev));
+    for (r = 0; r < 4; r++) {
+        S[2 * r][0] = G.reg[r][0]; S[2 * r][1] = G.reg[r][1]; S[2 * r][2] = G.reg[r][2];
+        S[2 * r + 1][0] = S[2 * r + 1][1] = S[2 * r + 1][2] = G.reg[r][3];
+        SA[r] = G.reg[r][3];
+    }
+    S[GX_CC_ONE][0] = S[GX_CC_ONE][1] = S[GX_CC_ONE][2] = 1.f;
+    S[GX_CC_HALF][0] = S[GX_CC_HALF][1] = S[GX_CC_HALF][2] = 0.5f;
+    S[GX_CC_ZERO][0] = S[GX_CC_ZERO][1] = S[GX_CC_ZERO][2] = 0.f;
+    SA[GX_CA_ZERO] = 0.f;
     for (s = 0; s < G.ntev; s++) {
         const Stage *st = &G.st[s];
-        float texc[4] = { 0, 0, 0, 0 }, ras[4] = { 0, 0, 0, 0 };
-        float cin[4][3], ain[4], out[4];
-        float kc[3], ka;
-        if (st->map < 8 && st->coord < 8 && G.bound[st->map] && G.bound[st->map]->rgba) fetch_fast(G.bound[st->map], G.bound[st->map]->wmask, G.bound[st->map]->hmask, tc[st->coord][0], tc[st->coord][1], texc);
-        if (st->color == GX_COLOR0A0 || st->color == GX_COLOR0) memcpy(ras, col[0], sizeof(ras));
-        else if (st->color == GX_COLOR1A1 || st->color == GX_COLOR1) memcpy(ras, col[1], sizeof(ras));
-        {
-            int ks = st->kcsel, as = st->kasel;
-            if (ks < 8) kc[0] = kc[1] = kc[2] = (8 - ks) / 8.f;
-            else if (ks >= 12 && ks <= 15) { kc[0] = G.kcol[ks - 12][0]; kc[1] = G.kcol[ks - 12][1]; kc[2] = G.kcol[ks - 12][2]; }
-            else if (ks >= 16 && ks <= 31) kc[0] = kc[1] = kc[2] = G.kcol[(ks - 16) & 3][(ks - 16) >> 2];
-            else kc[0] = kc[1] = kc[2] = 1.f;
-            if (as < 8) ka = (8 - as) / 8.f;
-            else if (as >= 16 && as <= 31) ka = G.kcol[(as - 16) & 3][(as - 16) >> 2];
-            else ka = 1.f;
+        float texc[4] = { 0, 0, 0, 0 };
+        static const float scl[4] = { 1.f, 2.f, 4.f, 0.5f };
+        float cbias, abias, csc, asc, a_out;
+        const float *ras = NULL;
+        int ks = st->kcsel, as = st->kasel;
+        if (st->map < 8 && st->coord < 8 && G.bound[st->map] && G.bound[st->map]->rgba)
+            fetch_fast(G.bound[st->map], G.bound[st->map]->wmask, G.bound[st->map]->hmask, tc[st->coord][0], tc[st->coord][1], texc);
+        S[GX_CC_TEXC][0] = texc[0]; S[GX_CC_TEXC][1] = texc[1]; S[GX_CC_TEXC][2] = texc[2];
+        S[GX_CC_TEXA][0] = S[GX_CC_TEXA][1] = S[GX_CC_TEXA][2] = texc[3];
+        SA[GX_CA_TEXA] = texc[3];
+        if (st->color == GX_COLOR0A0 || st->color == GX_COLOR0) ras = col[0];
+        else if (st->color == GX_COLOR1A1 || st->color == GX_COLOR1) ras = col[1];
+        if (ras) {
+            S[GX_CC_RASC][0] = ras[0]; S[GX_CC_RASC][1] = ras[1]; S[GX_CC_RASC][2] = ras[2];
+            S[GX_CC_RASA][0] = S[GX_CC_RASA][1] = S[GX_CC_RASA][2] = ras[3];
+            SA[GX_CA_RASA] = ras[3];
+        } else {
+            S[GX_CC_RASC][0] = S[GX_CC_RASC][1] = S[GX_CC_RASC][2] = 0.f;
+            S[GX_CC_RASA][0] = S[GX_CC_RASA][1] = S[GX_CC_RASA][2] = 0.f;
+            SA[GX_CA_RASA] = 0.f;
         }
-        /* colour */
-        for (k = 0; k < 4; k++) {
-            float *d = cin[k];
-            switch (st->ci[k]) {
-                case GX_CC_CPREV: d[0] = prev[0]; d[1] = prev[1]; d[2] = prev[2]; break;
-                case GX_CC_APREV: d[0] = d[1] = d[2] = prev[3]; break;
-                case GX_CC_C0: d[0] = regs[1][0]; d[1] = regs[1][1]; d[2] = regs[1][2]; break;
-                case GX_CC_A0: d[0] = d[1] = d[2] = regs[1][3]; break;
-                case GX_CC_C1: d[0] = regs[2][0]; d[1] = regs[2][1]; d[2] = regs[2][2]; break;
-                case GX_CC_A1: d[0] = d[1] = d[2] = regs[2][3]; break;
-                case GX_CC_C2: d[0] = regs[3][0]; d[1] = regs[3][1]; d[2] = regs[3][2]; break;
-                case GX_CC_A2: d[0] = d[1] = d[2] = regs[3][3]; break;
-                case GX_CC_TEXC: d[0] = texc[0]; d[1] = texc[1]; d[2] = texc[2]; break;
-                case GX_CC_TEXA: d[0] = d[1] = d[2] = texc[3]; break;
-                case GX_CC_RASC: d[0] = ras[0]; d[1] = ras[1]; d[2] = ras[2]; break;
-                case GX_CC_RASA: d[0] = d[1] = d[2] = ras[3]; break;
-                case GX_CC_ONE: d[0] = d[1] = d[2] = 1.f; break;
-                case GX_CC_HALF: d[0] = d[1] = d[2] = 0.5f; break;
-                case GX_CC_KONST: d[0] = kc[0]; d[1] = kc[1]; d[2] = kc[2]; break;
-                default: d[0] = d[1] = d[2] = 0.f; break;
-            }
-        }
+        if (ks < 8) S[GX_CC_KONST][0] = S[GX_CC_KONST][1] = S[GX_CC_KONST][2] = (8 - ks) / 8.f;
+        else if (ks >= 12 && ks <= 15) { S[GX_CC_KONST][0] = G.kcol[ks - 12][0]; S[GX_CC_KONST][1] = G.kcol[ks - 12][1]; S[GX_CC_KONST][2] = G.kcol[ks - 12][2]; }
+        else if (ks >= 16 && ks <= 31) S[GX_CC_KONST][0] = S[GX_CC_KONST][1] = S[GX_CC_KONST][2] = G.kcol[(ks - 16) & 3][(ks - 16) >> 2];
+        else S[GX_CC_KONST][0] = S[GX_CC_KONST][1] = S[GX_CC_KONST][2] = 1.f;
+        if (as < 8) SA[GX_CA_KONST] = (8 - as) / 8.f;
+        else if (as >= 16 && as <= 31) SA[GX_CA_KONST] = G.kcol[(as - 16) & 3][(as - 16) >> 2];
+        else SA[GX_CA_KONST] = 1.f;
+
+        cbias = st->c_bias == GX_TB_ADDHALF ? 0.5f : (st->c_bias == GX_TB_SUBHALF ? -0.5f : 0.f);
+        abias = st->a_bias == GX_TB_ADDHALF ? 0.5f : (st->a_bias == GX_TB_SUBHALF ? -0.5f : 0.f);
+        csc = scl[st->c_scale & 3];
+        asc = scl[st->a_scale & 3];
         {
-            static const float scl[4] = { 1.f, 2.f, 4.f, 0.5f };
-            float bias = st->c_bias == GX_TB_ADDHALF ? 0.5f : (st->c_bias == GX_TB_SUBHALF ? -0.5f : 0.f);
-            float sc = scl[st->c_scale & 3];
+            const float *ca = S[st->ci[0]], *cb = S[st->ci[1]], *cc = S[st->ci[2]], *cd = S[st->ci[3]];
+            float out[3];
             for (k = 0; k < 3; k++) {
-                float v = cin[0][k] * (1.f - cin[2][k]) + cin[1][k] * cin[2][k];
-                v = cin[3][k] + (st->c_op == GX_TEV_SUB ? -v : v) + bias;
-                v *= sc;
+                float v = ca[k] * (1.f - cc[k]) + cb[k] * cc[k];
+                v = cd[k] + (st->c_op == GX_TEV_SUB ? -v : v) + cbias;
+                v *= csc;
                 out[k] = st->c_clamp ? sat(v) : clampf(v, -4.f, 4.f);
             }
-            /* alpha */
-            for (k = 0; k < 4; k++) {
-                switch (st->ai[k]) {
-                    case GX_CA_APREV: ain[k] = prev[3]; break;
-                    case GX_CA_A0: ain[k] = regs[1][3]; break;
-                    case GX_CA_A1: ain[k] = regs[2][3]; break;
-                    case GX_CA_A2: ain[k] = regs[3][3]; break;
-                    case GX_CA_TEXA: ain[k] = texc[3]; break;
-                    case GX_CA_RASA: ain[k] = ras[3]; break;
-                    case GX_CA_KONST: ain[k] = ka; break;
-                    default: ain[k] = 0.f; break;
-                }
-            }
-            bias = st->a_bias == GX_TB_ADDHALF ? 0.5f : (st->a_bias == GX_TB_SUBHALF ? -0.5f : 0.f);
-            sc = scl[st->a_scale & 3];
             {
-                float v = ain[0] * (1.f - ain[2]) + ain[1] * ain[2];
-                v = ain[3] + (st->a_op == GX_TEV_SUB ? -v : v) + bias;
-                v *= sc;
-                out[3] = st->a_clamp ? sat(v) : clampf(v, -4.f, 4.f);
+                float v = SA[st->ai[0]] * (1.f - SA[st->ai[2]]) + SA[st->ai[1]] * SA[st->ai[2]];
+                v = SA[st->ai[3]] + (st->a_op == GX_TEV_SUB ? -v : v) + abias;
+                v *= asc;
+                a_out = st->a_clamp ? sat(v) : clampf(v, -4.f, 4.f);
             }
-        }
-        /* write outputs (colour and alpha may target different registers) */
-        {
-            float *dc = st->c_out == 0 ? prev : regs[st->c_out & 3];
-            float *da = st->a_out == 0 ? prev : regs[st->a_out & 3];
-            dc[0] = out[0]; dc[1] = out[1]; dc[2] = out[2];
-            da[3] = out[3];
+            /* outputs: colour and alpha may target different registers */
+            {
+                int rc_ = st->c_out & 3, ra_ = st->a_out & 3;
+                S[2 * rc_][0] = out[0]; S[2 * rc_][1] = out[1]; S[2 * rc_][2] = out[2];
+                SA[ra_] = a_out;
+                S[2 * ra_ + 1][0] = S[2 * ra_ + 1][1] = S[2 * ra_ + 1][2] = a_out;
+            }
         }
     }
-    memcpy(res, prev, sizeof(res));
+    res[0] = S[0][0]; res[1] = S[0][1]; res[2] = S[0][2]; res[3] = SA[0];
     write_pixel(idx, z, res);
 }
 
@@ -1609,7 +1617,7 @@ static int edge_top_left(float ax, float ay, float bx, float by)
 }
 
 /* ---- fast paths: a single TEV stage in one of the standard configurations ---- */
-enum { FAST_NONE = 0, FAST_MODULATE, FAST_REPLACE, FAST_PASSCLR };
+enum { FAST_NONE = 0, FAST_MODULATE, FAST_REPLACE, FAST_PASSCLR, FAST_MODULATE_KA, FAST_PASSCLR_KA };
 
 int port_gx_force_generic; /* test hook: forces the generic TEV path */
 int port_gx_no_vcache;     /* test hook: disables the post-transform vertex cache */
@@ -1662,7 +1670,29 @@ static int fast_select(void)
     if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_ZERO && st->ci[2] == GX_CC_ZERO && st->ci[3] == GX_CC_RASC &&
         st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_ZERO && st->ai[2] == GX_CA_ZERO && st->ai[3] == GX_CA_RASA)
         return FAST_PASSCLR;
+    /* texture * vertex colour, alpha = texture alpha * constant (a fade level) */
+    if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_TEXC && st->ci[2] == GX_CC_RASC && st->ci[3] == GX_CC_ZERO &&
+        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_TEXA && st->ai[2] == GX_CA_KONST && st->ai[3] == GX_CA_ZERO) {
+        if (!tex_ok) { G_stats.fast_fail[6]++; return FAST_NONE; }
+        return FAST_MODULATE_KA;
+    }
+    /* flat vertex colour with a constant alpha */
+    if (st->ci[0] == GX_CC_ZERO && st->ci[1] == GX_CC_ZERO && st->ci[2] == GX_CC_ZERO && st->ci[3] == GX_CC_RASC &&
+        st->ai[0] == GX_CA_ZERO && st->ai[1] == GX_CA_ZERO && st->ai[2] == GX_CA_ZERO && st->ai[3] == GX_CA_KONST)
+        return FAST_PASSCLR_KA;
     G_stats.fast_fail[5]++;
+    {
+        /* remember a few distinct unrecognised single-stage setups so they can be given a fast path later */
+        u8 key[16];
+        int i, j;
+        key[0] = st->ci[0]; key[1] = st->ci[1]; key[2] = st->ci[2]; key[3] = st->ci[3];
+        key[4] = st->ai[0]; key[5] = st->ai[1]; key[6] = st->ai[2]; key[7] = st->ai[3];
+        key[8] = st->c_scale; key[9] = st->a_scale; key[10] = st->c_bias; key[11] = st->a_bias; key[12] = st->c_op | (st->a_op << 1) | (st->c_clamp << 2) | (st->a_clamp << 3); key[13] = st->c_out; key[14] = st->a_out; key[15] = st->color;
+        for (i = 0; i < 6; i++) {
+            if (G_stats.pat_n[i] && !memcmp(G_stats.pat[i], key, 16)) { G_stats.pat_n[i]++; return FAST_NONE; }
+        }
+        for (j = 0; j < 6; j++) if (!G_stats.pat_n[j]) { memcpy(G_stats.pat[j], key, 16); G_stats.pat_n[j] = 1; break; }
+    }
     return FAST_NONE;
 }
 
@@ -1741,7 +1771,8 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     float sx[3], sy[3], sz[3], iw[3];
     float area, minx, maxx, miny, maxy;
     int x0, x1, y0, y1, x, y, i, k, tl0, tl1, tl2;
-    int fast, na, affine, ntc, int_path;
+    int fast, na, affine, ntc, int_path, fast_tex = 0, ka8 = 255;
+    float kaf = 1.f;
     const Tex *ftex = NULL;
     int fcoord = 0, flinear = 0;
     float inv_area, iw_const = 1.f, inv_iw_const = 1.f;
@@ -1795,6 +1826,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     if (y1 > EFB_H) y1 = EFB_H;
     if (x0 >= x1 || y0 >= y1) return;
     G_stats.tris_drawn++;
+    if (G.z_upd) G.depth_dirty = 1;
 
     tl0 = edge_top_left(sx[1], sy[1], sx[2], sy[2]); /* edge opposite v0 */
     tl1 = edge_top_left(sx[2], sy[2], sx[0], sy[0]);
@@ -1813,7 +1845,19 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     ntc = G.ntexgens < 8 ? G.ntexgens : 8;
     fast = fast_select();
     alpha_trivial = (G.ac0 == GX_ALWAYS && G.ac1 == GX_ALWAYS && (G.aop == GX_AOP_AND || G.aop == GX_AOP_OR));
-    if (fast == FAST_MODULATE || fast == FAST_REPLACE) {
+    if (fast == FAST_MODULATE) {
+        /* vertex colour is exactly opaque white on all three vertices: modulating by it is a no-op */
+        int w = 1, vi;
+        for (vi = 0; vi < 3; vi++) if (v[vi]->col[0][0] != 1.f || v[vi]->col[0][1] != 1.f || v[vi]->col[0][2] != 1.f || v[vi]->col[0][3] != 1.f) w = 0;
+        if (w) fast = FAST_REPLACE;
+    }
+    fast_tex = (fast == FAST_MODULATE || fast == FAST_REPLACE || fast == FAST_MODULATE_KA);
+    if (fast == FAST_MODULATE_KA || fast == FAST_PASSCLR_KA) {
+        int as = G.st[0].kasel;
+        kaf = as < 8 ? (8 - as) / 8.f : ((as >= 16 && as <= 31) ? G.kcol[(as - 16) & 3][(as - 16) >> 2] : 1.f);
+        ka8 = (int)(kaf * 255.f + 0.5f);
+    }
+    if (fast_tex) {
         ftex = G.bound[G.st[0].map];
         fcoord = G.st[0].coord;
         flinear = (ftex->ws & 0x80) != 0;
@@ -1827,7 +1871,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
     if (!affine) act[nact++] = 1;
     for (k = 2; k < 6; k++) act[nact++] = k;
     if (fast) {
-        if (fast != FAST_PASSCLR) { act[nact++] = 10 + 2 * fcoord; act[nact++] = 11 + 2 * fcoord; }
+        if (fast_tex) { act[nact++] = 10 + 2 * fcoord; act[nact++] = 11 + 2 * fcoord; }
     } else {
         for (i = 0; i < G.ntev; i++) {
             const Stage *st = &G.st[i];
@@ -1870,7 +1914,7 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
                 int c[4], dc[4], u = 0, vv = 0, du = 0, dv = 0;
                 float zc = pl0[0] + pldx[0] * (float)lo, dz = pldx[0];
                 for (k = 0; k < 4; k++) { c[k] = (int)((pl0[2 + k] + pldx[2 + k] * (float)lo) * cs); dc[k] = (int)(pldx[2 + k] * cs); }
-                if (fast != FAST_PASSCLR) {
+                if (fast_tex) {
                     float us = inv_iw_const * (float)ftex->w * 65536.f, vs = inv_iw_const * (float)ftex->h * 65536.f;
                     u = (int)((pl0[10 + 2 * fcoord] + pldx[10 + 2 * fcoord] * (float)lo) * us);
                     vv = (int)((pl0[11 + 2 * fcoord] + pldx[11 + 2 * fcoord] * (float)lo) * vs);
@@ -1882,26 +1926,41 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
                     int idx = y * EFB_W + x;
                     int r, g, b, a;
                     u32 d, o;
+                    if (((x - xa) & 15) == 0) { /* stay a cache line or two ahead of the stores / texture reads */
+                        __builtin_prefetch(&G.color[idx + 32], 1, 0);
+                        if (G.z_en) __builtin_prefetch(&G.depth[idx + 32], 1, 0);
+                        if (fast_tex) __builtin_prefetch(&ftex->rgba[wrap_fast((vv + dv * 16) >> 16, ftex->h, ftex->hmask, ftex->wt & 3) * ftex->w + wrap_fast((u + du * 16) >> 16, ftex->w, ftex->wmask, ftex->ws & 3)], 0, 0);
+                    }
                     if (G.z_en && !cmp_ok(G.z_func, zc, G.depth[idx])) continue;
                     r = c[0] >> 16; g = c[1] >> 16; b = c[2] >> 16; a = c[3] >> 16;
                     r = r < 0 ? 0 : (r > 255 ? 255 : r); g = g < 0 ? 0 : (g > 255 ? 255 : g);
                     b = b < 0 ? 0 : (b > 255 ? 255 : b); a = a < 0 ? 0 : (a > 255 ? 255 : a);
-                    if (fast != FAST_PASSCLR) {
+                    if (fast_tex) {
                         u32 t = fetch_i(ftex, flinear, u, vv);
-                        int tr = (t >> 16) & 255, tg = (t >> 8) & 255, tb = t & 255, ta = t >> 24;
-                        if (fast == FAST_MODULATE) { r = mul8(r, tr); g = mul8(g, tg); b = mul8(b, tb); a = mul8(a, ta); }
-                        else { r = tr; g = tg; b = tb; a = ta; }
+                        if (fast == FAST_MODULATE) {
+                            r = mul8(r, (t >> 16) & 255); g = mul8(g, (t >> 8) & 255); b = mul8(b, t & 255); a = mul8(a, t >> 24);
+                        } else if (fast == FAST_MODULATE_KA) {
+                            r = mul8(r, (t >> 16) & 255); g = mul8(g, (t >> 8) & 255); b = mul8(b, t & 255); a = mul8(t >> 24, ka8);
+                        } else { r = (t >> 16) & 255; g = (t >> 8) & 255; b = t & 255; a = t >> 24; }
+                    } else if (fast == FAST_PASSCLR_KA) {
+                        a = ka8;
                     }
                     if (!alpha_trivial && !atest8(a)) continue;
                     if (G.z_upd) G.depth[idx] = zc;
                     if (nfast_blend == 1) {
-                        int ia = 255 - a, orr, og, ob, oa;
-                        d = G.color[idx];
-                        orr = mul8(r, a) + mul8((d >> 16) & 255, ia);
-                        og = mul8(g, a) + mul8((d >> 8) & 255, ia);
-                        ob = mul8(b, a) + mul8(d & 255, ia);
-                        oa = mul8(a, a) + mul8(d >> 24, ia);
-                        o = pack(orr > 255 ? 255 : orr, og > 255 ? 255 : og, ob > 255 ? 255 : ob, oa > 255 ? 255 : oa);
+                        if (a == 0) continue;        /* fully transparent: colour and alpha stay as they are */
+                        if (a == 255) { o = pack(r, g, b, 255); }
+                        else {
+                            /* two channels per multiply: blue/red in one word, green/alpha in the other */
+                            u32 sp = pack(r, g, b, a), rb, ag;
+                            int ia = 255 - a;
+                            d = G.color[idx];
+                            rb = (sp & 0x00FF00FFu) * (u32)a + (d & 0x00FF00FFu) * (u32)ia + 0x00800080u;
+                            rb = ((rb + ((rb >> 8) & 0x00FF00FFu)) >> 8) & 0x00FF00FFu;
+                            ag = ((sp >> 8) & 0x00FF00FFu) * (u32)a + ((d >> 8) & 0x00FF00FFu) * (u32)ia + 0x00800080u;
+                            ag = (ag + ((ag >> 8) & 0x00FF00FFu)) & 0xFF00FF00u;
+                            o = rb | ag;
+                        }
                     } else {
                         o = pack(r, g, b, a);
                     }
@@ -1920,11 +1979,14 @@ static void raster_tri(PV *v0, PV *v1, PV *v2)
                         G_stats.px_fast++;
                         if (G.z_en && !cmp_ok(G.z_func, z, G.depth[idx])) goto next_pixel;
                         res[0] = cur[2] * invw; res[1] = cur[3] * invw; res[2] = cur[4] * invw; res[3] = cur[5] * invw;
-                        if (fast != FAST_PASSCLR) {
+                        if (fast_tex) {
                             float tx[4];
                             fetch_fast(ftex, ftex->wmask, ftex->hmask, cur[10 + 2 * fcoord] * invw, cur[11 + 2 * fcoord] * invw, tx);
                             if (fast == FAST_MODULATE) { res[0] *= tx[0]; res[1] *= tx[1]; res[2] *= tx[2]; res[3] *= tx[3]; }
+                            else if (fast == FAST_MODULATE_KA) { res[0] *= tx[0]; res[1] *= tx[1]; res[2] *= tx[2]; res[3] = tx[3] * kaf; }
                             else { res[0] = tx[0]; res[1] = tx[1]; res[2] = tx[2]; res[3] = tx[3]; }
+                        } else if (fast == FAST_PASSCLR_KA) {
+                            res[3] = kaf;
                         }
                         if (!alpha_trivial && !atest8((int)(sat(res[3]) * 255.f + 0.5f))) goto next_pixel;
                         if (G.z_upd) G.depth[idx] = z;
@@ -2034,6 +2096,14 @@ int port_gx_present(void)
                      G_stats.frames, (u32)(wall / 1000), (u32)(G_stats.t_draw / 1000), G_stats.tris, G_stats.tris_drawn, G_stats.px_fast, G_stats.px_general,
                      (u32)(G_stats.t_decode / 1000), G_stats.tex_decodes, (u32)(G_stats.t_present / 1000), G_stats.vc_hit, G_stats.vc_miss,
                      G_stats.fast_fail[1], G_stats.fast_fail[2], G_stats.fast_fail[3], G_stats.fast_fail[4], G_stats.fast_fail[5], G_stats.fast_fail[6]);
+            {
+                int i;
+                for (i = 0; i < 6; i++) if (G_stats.pat_n[i]) {
+                    const u8 *k = G_stats.pat[i];
+                    OSReport("[gx]   unmatched 1-stage TEV x%u: color in %d,%d,%d,%d alpha in %d,%d,%d,%d scale %d/%d bias %d/%d flags %02x out %d/%d ras %d\n", G_stats.pat_n[i],
+                             k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8], k[9], k[10], k[11], k[12], k[13], k[14], k[15]);
+                }
+            }
             memset(&G_stats, 0, sizeof(G_stats));
             G_stats.t_last = now;
         } else if (!G_stats.t_last) {

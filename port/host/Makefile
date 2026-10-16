@@ -12,7 +12,7 @@ OUT := build/host
 GAME_SRC := $(filter-out $(addprefix src/game/,$(addsuffix .c,$(SKIP))),$(shell find src/game src/libhu -name '*.c' | sort))
 GAME_OBJ := $(patsubst %.c,$(OUT)/%.o,$(GAME_SRC))
 # Overlays whose SDK references should get stubs too (keep in sync with PORT_RELS in port/ps3/Makefile)
-PORT_RELS ?= bootDll
+PORT_RELS ?= bootDll modeseldll
 REL_SRC := $(foreach r,$(PORT_RELS),$(wildcard src/REL/$(r)/*.c))
 REL_OBJ := $(patsubst %.c,$(OUT)/%.o,$(REL_SRC))
 SHIM_SRC := $(wildcard port/host/src/*.c)

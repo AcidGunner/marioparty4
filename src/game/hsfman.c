@@ -444,7 +444,13 @@ s16 Hu3DModelLink(s16 arg0) {
         return -1;
     }
     var_r31->hsfLink = temp_r30->hsf;
+#ifdef TARGET_PC
+    /* 0x80 held a 32-bit HSFDATA (0x7A bytes); the native 64-bit struct is larger, and copying it into a 0x80 block
+       overruns the heap */
+    var_r31->hsf = HuMemDirectMallocNum(HEAP_MODEL, (sizeof(HSFDATA) + 31) & ~31, var_r31->mallocNoLink);
+#else
     var_r31->hsf = HuMemDirectMallocNum(HEAP_MODEL, 0x80, var_r31->mallocNoLink);
+#endif
     var_r31->mallocNoLink = (u32)var_r31->hsf;
     *var_r31->hsf = *temp_r30->hsf;
     temp_r3_2 = Hu3DObjDuplicate(var_r31->hsf, var_r31->mallocNoLink);
